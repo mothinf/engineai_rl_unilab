@@ -22,7 +22,11 @@
 
   <worldbody>
     <light pos="1 0 3.5" dir="0 0 -1" directional="true"/>
-    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+    <!-- MuJoCo uses max(geom1, geom2) for equal-priority contact friction.
+         A zero floor coefficient lets the robot-side material bucket own the
+         effective sliding friction, matching the training setup. -->
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"
+      friction="0 0.005 0.0001"/>
   </worldbody>
 
   <sensor>

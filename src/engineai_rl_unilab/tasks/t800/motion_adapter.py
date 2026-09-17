@@ -74,9 +74,10 @@ def _names(array: np.ndarray, label: str) -> tuple[str, ...]:
     return names
 
 
-def _load_source(
-    path: str | Path,
-) -> tuple[int, tuple[str, ...], dict[str, np.ndarray]]:
+def read_motion_npz(
+    path: str | Path, *, num_bodies: int
+) -> tuple[int, tuple[str, ...], tuple[str, ...] | None, dict[str, np.ndarray]]:
+    """Shared structural checks; callers must additionally enforce frame semantics."""
     with np.load(path, allow_pickle=False) as source:
         missing = {"fps", "joint_names", *STATE_FIELDS}.difference(source.files)
         if missing:
@@ -89,10 +90,14 @@ def _load_source(
             raise ValueError("fps must be a positive integer frame rate")
         names = _names(source["joint_names"], "joint_names")
         if len(names) != 25:
-            raise ValueError("t800_isaac_v1 requires 25 named joints")
-        if "body_names" in source.files:
-            if _names(source["body_names"], "body_names") != SOURCE_BODY_NAMES:
-                raise ValueError("body_names do not match t800_isaac_v1 source order")
+            raise ValueError("T800 motions require 25 named joints")
+        body_names = (
+            _names(source["body_names"], "body_names")
+            if "body_names" in source.files
+            else None
+        )
+        if body_names is not None and len(body_names) != num_bodies:
+            raise ValueError(f"body_names must contain {num_bodies} names")
         arrays = {}
         for field in STATE_FIELDS:
             value = source[field]
@@ -108,17 +113,27 @@ def _load_source(
         expected = (
             (frames, 25)
             if field.startswith("joint_")
-            else (frames, len(SOURCE_BODY_NAMES), 4 if field == "body_quat_w" else 3)
+            else (frames, num_bodies, 4 if field == "body_quat_w" else 3)
         )
         if value.shape != expected:
             raise ValueError(
                 f"{field}: expected {expected}, got {value.shape}; "
-                "t800_isaac_v1 accepts source layout only, not converted MuJoCo NPZ"
+                "check the explicitly selected source format/body layout"
             )
     norms = np.linalg.norm(arrays["body_quat_w"], axis=-1)
     if not np.allclose(norms, 1.0, atol=1e-3, rtol=0):
         raise ValueError("body_quat_w must contain unit wxyz quaternions")
-    return int(fps), names, arrays
+    return int(fps), names, body_names, arrays
+
+
+def load_t800_isaac_source(
+    path: str | Path,
+) -> tuple[int, tuple[str, ...], dict[str, np.ndarray]]:
+    """Read the source without regenerating or discarding its body states."""
+    fps, names, bodies, arrays = read_motion_npz(path, num_bodies=30)
+    if bodies is not None and bodies != SOURCE_BODY_NAMES:
+        raise ValueError("body_names do not match t800_isaac_v1 source order")
+    return fps, names, arrays
 
 
 def _tracking_fk(
@@ -198,7 +213,7 @@ def adapt_t800_isaac_motion(
     No resampling, trajectory differentiation, disk output or domain
     randomization is performed. Joint output order is explicitly caller-owned.
     """
-    fps, source_names, arrays = _load_source(motion_file)
+    fps, source_names, arrays = load_t800_isaac_source(motion_file)
     target_names = tuple(joint_names)
     if len(set(target_names)) != len(target_names) or set(target_names) != set(
         source_names

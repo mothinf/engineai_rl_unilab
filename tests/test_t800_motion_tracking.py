@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 from engineai_rl_unilab.cli import CONF_ROOT, _build_command, _ensure_registry_env
 from hydra import compose, initialize_config_dir
 
@@ -38,7 +39,9 @@ def test_mujoco_owner_contract():
     assert cfg.algo.num_envs == 1024
     assert cfg.algo.seed == 1
     assert cfg.algo.save_interval == 500
-    assert cfg.env.commands.motion.params.motion_file.endswith("first18s_mujoco_v2.npz")
+    assert cfg.env.commands.motion.params.motion_file.endswith("first18s.npz")
+    assert cfg.env.commands.motion.motion_adapter == "t800_isaac_v1"
+    assert cfg.env.commands.motion.motion_model_file == cfg.env.scene.model_file
     assert cfg.env.observations.actor.terms.motion_anchor_pos_b is None
     assert cfg.env.observations.actor.terms.base_lin_vel is None
     assert cfg.env.observations.actor.enable_corruption
@@ -102,42 +105,33 @@ def test_mujoco_owner_contract():
 
 def test_motion_matches_robot_body_and_joint_order():
     import mujoco
+    from engineai_rl_unilab.tasks.t800.motion_adapter import adapt_t800_isaac_motion
 
     cfg = owner()
     model = mujoco.MjModel.from_xml_path(str(ROOT / cfg.env.scene.model_file))
-    with np.load(ROOT / cfg.env.commands.motion.params.motion_file) as motion:
-        joint_names = [
-            model.joint(i).name for i in range(model.njnt) if model.jnt_type[i] != 0
-        ]
-        assert motion["joint_names"].tolist() == joint_names
-        assert motion["body_names"][0] == ""  # MuJoCo world-body placeholder.
-        assert motion["body_names"][1:].tolist() == [
-            model.body(i).name for i in range(1, model.nbody)
-        ]
-        assert motion["joint_pos"].shape[1] == 25
-        for field in (
-            "joint_pos",
-            "joint_vel",
-            "body_pos_w",
-            "body_quat_w",
-            "body_lin_vel_w",
-            "body_ang_vel_w",
-        ):
-            assert np.isfinite(motion[field]).all(), field
-        # Model-order metadata alone cannot catch a source-frame/FK mismatch.
-        data = mujoco.MjData(model)
-        for frame in (0, len(motion["joint_pos"]) // 2, len(motion["joint_pos"]) - 1):
-            data.qpos[:3] = motion["body_pos_w"][frame, 1]
-            data.qpos[3:7] = motion["body_quat_w"][frame, 1]
-            data.qpos[7:] = motion["joint_pos"][frame]
-            mujoco.mj_forward(model, data)
-            np.testing.assert_allclose(
-                data.xpos, motion["body_pos_w"][frame], atol=1e-5
-            )
-            quat_dot = np.abs(
-                np.sum(data.xquat * motion["body_quat_w"][frame], axis=-1)
-            )
-            np.testing.assert_allclose(quat_dot, 1.0, atol=1e-5)
+    joint_names = tuple(
+        model.joint(i).name for i in range(model.njnt) if model.jnt_type[i] != 0
+    )
+    adapted = adapt_t800_isaac_motion(
+        ROOT / cfg.env.commands.motion.params.motion_file,
+        model_file=ROOT / cfg.env.scene.model_file,
+        joint_names=joint_names,
+    )
+    assert adapted.joint_names == joint_names
+    assert adapted.body_names == (
+        "",
+        *(model.body(i).name for i in range(1, model.nbody)),
+    )
+    motion = adapted.data
+    data = mujoco.MjData(model)
+    for frame in (0, len(motion.joint_pos) // 2, len(motion.joint_pos) - 1):
+        data.qpos[:3] = motion.body_pos_w[frame, 1]
+        data.qpos[3:7] = motion.body_quat_w[frame, 1]
+        data.qpos[7:] = motion.joint_pos[frame]
+        mujoco.mj_forward(model, data)
+        np.testing.assert_allclose(data.xpos, motion.body_pos_w[frame], atol=1e-5)
+        quat_dot = np.abs(np.sum(data.xquat * motion.body_quat_w[frame], axis=-1))
+        np.testing.assert_allclose(quat_dot, 1.0, atol=1e-5)
 
 
 def test_v2_reference_repairs_foot_velocity_frame_without_changing_pose():
@@ -177,11 +171,19 @@ def test_v2_reference_repairs_foot_velocity_frame_without_changing_pose():
             assert fixed_rms < old_rms / 10
 
 
-def test_runtime_reset_step_and_partial_reset(monkeypatch):
+@pytest.mark.parametrize("adapt_source", [True, False])
+def test_runtime_reset_step_and_partial_reset(monkeypatch, adapt_source):
     monkeypatch.chdir(ROOT)
     _ensure_registry_env()
     registry.ensure_registries()
     cfg = owner()
+    if not adapt_source:
+        # Missing opt-in fields must continue to materialize the original loader.
+        del cfg.env.commands.motion.motion_adapter
+        del cfg.env.commands.motion.motion_model_file
+        cfg.env.commands.motion.params.motion_file = (
+            "assets/motions/t800/dance1_subject2_t800_first18s_mujoco_v2.npz"
+        )
     override = BackendAdapter(
         cfg, root_dir=ROOT, algo_name="ppo"
     ).build_task_env_cfg_override()
@@ -190,6 +192,11 @@ def test_runtime_reset_step_and_partial_reset(monkeypatch):
     )
     try:
         env.init_state()
+        from unilab.tasks.motion_tracking.common.motion_loader import MotionLoader
+        from engineai_rl_unilab.tasks.t800.motion_loader import T800MotionLoader
+
+        motion = env.command_manager.get_term("motion").motion
+        assert type(motion) is (T800MotionLoader if adapt_source else MotionLoader)
         obs, info = env.reset(np.arange(2, dtype=np.int32))
         assert isinstance(obs, dict) and isinstance(info, dict)
         assert env.obs_groups_spec == {"obs": 134, "critic": 275}

@@ -272,10 +272,12 @@ env:
   commands:
     motion:
       _target_: engineai_rl_unilab.tasks.t800.manager_terms.OfficialMotionCommandCfg
+      motion_adapter: t800_isaac_v1
+      motion_model_file: ${env.scene.model_file}
       entity_name: robot
       resampling_time_range: [1.0e9, 1.0e9]
       params:
-        motion_file: assets/motions/t800/dance1_subject2_t800_first18s_mujoco_v2.npz
+        motion_file: assets/motions/t800/dance1_subject2_t800_first18s.npz
         anchor_body_name: LINK_BASE
         body_names:
           - LINK_BASE

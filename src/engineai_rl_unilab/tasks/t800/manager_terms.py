@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
     from unilab.base.entity import Entity
     from unilab.managers._types import ManagerBasedRlEnv
+    from unilab.tasks.motion_tracking.common.motion_loader import MotionLoader
 
 
 _LATERAL_FOOT_SENSORS = (
@@ -551,12 +552,43 @@ class OfficialFixedRigidBodyCom(ManagerTermBase):
 
 @dataclass(kw_only=True)
 class OfficialMotionCommandCfg(MotionCommandCfg):
+    # Opt-in: old configurations keep UniLab's existing canonical NPZ reader.
+    motion_adapter: str | None = None
+    motion_model_file: str | None = None
+
     def build(self, env: ManagerBasedRlEnv) -> "OfficialMotionCommand":
         return OfficialMotionCommand(self, env)
 
 
 class OfficialMotionCommand(MotionCommand):
     """Keep the startup encoder bias and trained adaptive-sampler decay."""
+
+    cfg: OfficialMotionCommandCfg
+
+    def _make_motion_loader(
+        self, motion_file: str | list[str], body_indices: np.ndarray
+    ) -> MotionLoader:
+        if self.cfg.motion_adapter is None:
+            return super()._make_motion_loader(motion_file, body_indices)
+        if self.cfg.motion_adapter != "t800_isaac_v1":
+            raise ValueError(f"Unsupported motion_adapter: {self.cfg.motion_adapter!r}")
+        if not self.cfg.motion_model_file:
+            raise ValueError("t800_isaac_v1 requires motion_model_file")
+        from .motion_loader import T800MotionLoader
+
+        motion = T800MotionLoader(
+            motion_file,
+            model_file=self.cfg.motion_model_file,
+            joint_names=self.robot.joint_names,
+            body_indices=body_indices,
+        )
+        if motion.body_names != self.cfg.body_names:
+            raise ValueError("adapter model body IDs do not match the training entity")
+        if motion.body_names[0] != "LINK_BASE":
+            raise ValueError("T800 reset requires LINK_BASE as the first tracked body")
+        if not np.isclose(motion.fps * self._env.step_dt, 1.0):
+            raise ValueError("T800 motion fps must match the training control frequency")
+        return motion
 
     def __init__(self, cfg: OfficialMotionCommandCfg, env: ManagerBasedRlEnv):
         super().__init__(cfg, env)

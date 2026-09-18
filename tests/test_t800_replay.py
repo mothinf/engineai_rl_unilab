@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from contextlib import nullcontext
+from collections import deque
 import json
 from types import SimpleNamespace
 
@@ -22,11 +23,14 @@ from engineai_rl_unilab.tasks.t800.replay import (
     KEY_HELP,
     ReplayState,
     check_viewer_shortcuts,
+    contact_status,
     draw_ghosts,
+    enqueue_replay_key,
     ghost_texts,
     main,
     marker_endpoints,
     run_viewer,
+    warn_motion_report,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -113,6 +117,10 @@ def test_cli_reports_defaults_removed_options_and_coverage(tmp_path, capsys):
     output = tmp_path / "report.json"
     args = ["--format", "mujoco", "--check-only", "--report", str(output)]
     assert main([*args, "--npz-file", str(OLD)]) == 1
+    warnings = capsys.readouterr().err
+    assert "[WARNING] NPZ data consistency check FAILED" in warnings
+    assert "body_linear_fd" in warnings and "body-velocity position" in warnings
+    assert "frame=" in warnings and "body=LINK_" in warnings
     payload = json.loads(output.read_text())["file"]
     assert (
         payload["ghosts"]["layers"]["body-velocity"]["entities"]["LINK_ANKLE_ROLL_L"][
@@ -121,6 +129,7 @@ def test_cli_reports_defaults_removed_options_and_coverage(tmp_path, capsys):
         == "FAIL"
     )
     assert main([*args, "--npz-file", str(V2)]) == 0
+    assert "[WARNING]" not in capsys.readouterr().err
     assert json.loads(output.read_text())["file"]["status"] == "PASS"
     assert main(["--check-only", "--report", str(output)]) == 0
     payload = json.loads(output.read_text())
@@ -153,6 +162,7 @@ def test_cli_reports_defaults_removed_options_and_coverage(tmp_path, capsys):
     custom = tmp_path / "extra.npz"
     np.savez(custom, **extra)
     assert main([*args, "--npz-file", str(custom)]) == 0
+    assert "NPZ verification INCOMPLETE" in capsys.readouterr().err
     payload = json.loads(output.read_text())["file"]
     assert payload["status"] == "PARTIAL"
     assert payload["coverage"]["unsupported_fields"] == ["additional_signal"]
@@ -358,3 +368,97 @@ def test_native_shortcut_guard_and_partial_overlays(loaded, monkeypatch, isaac_n
                 "UNVERIFIED"
                 in ghost_texts(state, report, set(GHOST_NAMES), 7, True)[1][3]
             )
+
+
+@pytest.mark.parametrize("key", [ord("C"), ord("F")])
+def test_contact_keys_never_enter_replay_queue(monkeypatch, key):
+    events = deque()
+    enqueue_replay_key(events, key)
+    assert not events
+    enqueue_replay_key(events, 297)
+    assert list(events) == [297]
+    monkeypatch.setitem(KEY_BINDINGS, key, "pose")
+    with pytest.raises(RuntimeError, match="conflict"):
+        check_viewer_shortcuts()
+
+
+@pytest.mark.parametrize("play", [False, True])
+def test_native_contacts_survive_ghost_toggles_and_frame_changes(
+    loaded, monkeypatch, play
+):
+    model, reports = loaded
+    snapshots = run_keys(
+        monkeypatch,
+        model,
+        {"file": reports["v2"]},
+        [[], [ord("C")], [ord("F")], [297, 298, 299], [], [ord("C"), ord("F")]],
+        play=play,
+        start_frame=568,
+    )
+    cp, cf = mujoco.mjtVisFlag.mjVIS_CONTACTPOINT, mujoco.mjtVisFlag.mjVIS_CONTACTFORCE
+    for snap, expected in zip(
+        snapshots, ((0, 0), (1, 0), (1, 1), (1, 1), (1, 1), (0, 0))
+    ):
+        assert (snap[2][cp], snap[2][cf]) == expected
+        assert ("PLAYING" if play else "PAUSED") in snap[0]
+    assert "C contacts: ON | F forces: ON" in snapshots[2][0]
+    assert (
+        "No contacts at this frame" if play else "NOT recorded NPZ forces"
+    ) in snapshots[2][0]
+    assert "pose [on]" in snapshots[2][0] and "pose [off]" in snapshots[3][0]
+
+
+def test_native_contact_geometry_coexists_with_ghosts(loaded):
+    model, reports = loaded
+    report = reports["v2"]
+    state = ReplayState(model, report.view)
+    state.set_frame(568)  # real recorded pose with three contacts; no injected physics
+    assert state.data.ncon == 3
+    scene = mujoco.MjvScene(model, maxgeom=2000)
+    opt, camera = mujoco.MjvOption(), mujoco.MjvCamera()
+    cp, cf = mujoco.mjtVisFlag.mjVIS_CONTACTPOINT, mujoco.mjtVisFlag.mjVIS_CONTACTFORCE
+    for points, forces in ((0, 0), (1, 0), (0, 1), (1, 1)):
+        opt.flags[cp], opt.flags[cf] = points, forces
+        mujoco.mjv_updateScene(
+            model, state.data, opt, None, camera, mujoco.mjtCatBit.mjCAT_ALL, scene
+        )
+        contacts = [
+            g
+            for g in scene.geoms[: scene.ngeom]
+            if g.category == mujoco.mjtCatBit.mjCAT_DECOR
+        ]
+        assert len(contacts) == state.data.ncon * (points + forces)
+        assert (
+            sum(g.type == mujoco.mjtGeom.mjGEOM_ARROW for g in contacts)
+            == state.data.ncon * forces
+        )
+        native_count = scene.ngeom
+        native_positions = np.array([g.pos.copy() for g in scene.geoms[:native_count]])
+        draw_ghosts(scene, state, report, set(GHOST_NAMES), 7)
+        np.testing.assert_array_equal(
+            native_positions, [g.pos for g in scene.geoms[:native_count]]
+        )
+        assert (opt.flags[cp], opt.flags[cf]) == (points, forces)
+    state.set_frame(799)
+    assert state.data.ncon == 0
+    assert "No contacts at this frame" in contact_status(state, opt)
+
+
+def test_ghost_only_failures_also_warn(loaded, capsys):
+    from engineai_rl_unilab.tasks.t800.motion_ghosts import GhostOptions
+
+    model, reports = loaded
+    report = build_ghosts(reports["v2"].base, model, GhostOptions(position_tol=0.0001))
+    assert not report.base.failed and report.failed
+    warn_motion_report(V2, report)
+    warnings = capsys.readouterr().err
+    assert "FAILED" in warnings and "body-velocity position" in warnings
+    assert "Failed numerical checks" not in warnings
+
+
+def test_viewer_receives_warning_before_launch(monkeypatch, capsys):
+    def viewer(*args):
+        assert "[WARNING] NPZ data consistency check FAILED" in capsys.readouterr().err
+
+    monkeypatch.setattr("engineai_rl_unilab.tasks.t800.replay.run_viewer", viewer)
+    assert main(["--npz-file", str(OLD), "--play"]) == 1

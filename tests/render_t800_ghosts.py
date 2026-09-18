@@ -24,15 +24,30 @@ from engineai_rl_unilab.tasks.t800.motion_ghosts import (
     quat_mul,
 )
 from engineai_rl_unilab.tasks.t800.motion_validation import load_views, validate_motion
-from engineai_rl_unilab.tasks.t800.replay import ReplayState, draw_ghosts, ghost_texts
+from engineai_rl_unilab.tasks.t800.replay import (
+    ReplayState,
+    contact_status,
+    draw_ghosts,
+    ghost_texts,
+)
 
 
 def render(
-    model, report, path, enabled, frame=799, width=1500, height=1000, closeup=False
+    model,
+    report,
+    path,
+    enabled,
+    frame=799,
+    width=1500,
+    height=1000,
+    closeup=False,
+    contact_points=False,
+    contact_forces=False,
+    body_name="LINK_ANKLE_ROLL_L",
 ):
     state = ReplayState(model, report.view)
     state.set_frame(frame)
-    body = model.body("LINK_ANKLE_ROLL_L").id
+    body = model.body(body_name).id
     camera = mujoco.MjvCamera()
     camera.lookat[:] = state.data.xpos[state.root]
     camera.distance = 3.5
@@ -47,11 +62,20 @@ def render(
     with mujoco.Renderer(model, height=height, width=width, max_geom=3000) as renderer:
         option = mujoco.MjvOption()
         option.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = True
+        option.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = contact_points
+        option.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = contact_forces
         renderer.update_scene(state.data, camera=camera, scene_option=option)
         draw_ghosts(renderer.scene, state, report, enabled, body)
         renderer.render()
         viewport = mujoco.MjrRect(0, 0, width, height)
-        for _, location, left, right in ghost_texts(state, report, enabled, body, True):
+        for _, location, left, right in ghost_texts(
+            state,
+            report,
+            enabled,
+            body,
+            True,
+            native_status=contact_status(state, option),
+        ):
             assert max(len(left), len(right)) < mujoco.mjMAXOVERLAY
             mujoco.mjr_overlay(
                 mujoco.mjtFont.mjFONT_NORMAL,
@@ -68,6 +92,9 @@ def render(
             "frame": frame,
             "scene_geoms": renderer.scene.ngeom,
             "ghosts": sorted(enabled),
+            "contacts": state.data.ncon,
+            "contact_points": contact_points,
+            "contact_forces": contact_forces,
         }
 
 
@@ -146,6 +173,25 @@ def main():
         (args.output_dir / f"{key}-report.json").write_text(
             json.dumps(report.as_dict(), indent=2, allow_nan=False) + "\n"
         )
+    for name, points, forces in (
+        ("contacts-off", False, False),
+        ("contacts-C", True, False),
+        ("contacts-F", False, True),
+        ("contacts-CF", True, True),
+    ):
+        path = args.output_dir / f"{name}.png"
+        measurements[name] = render(
+            model,
+            reports["v2"],
+            path,
+            set(GHOST_NAMES),
+            frame=568,
+            closeup=True,
+            contact_points=points,
+            contact_forces=forces,
+            body_name="LINK_ANKLE_ROLL_R",
+        )
+        print(path)
     (args.output_dir / "renders.json").write_text(
         json.dumps(measurements, indent=2) + "\n"
     )

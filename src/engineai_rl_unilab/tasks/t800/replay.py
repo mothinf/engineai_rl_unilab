@@ -4,11 +4,11 @@ Examples (from the repository root)::
 
     engineai-replay --format mujoco --npz-file motion.npz --play --loop
     engineai-replay --ghosts body-velocity --ghost-window 0.2
-    engineai-replay --view reference --check-only --report report.json
+    engineai-replay --check-only --report report.json
 
-F8/F9/F10 toggle pose/body-velocity/joint-velocity ghosts. F11 switches
-file/reference; F12 selects a body (or use --body). Space pauses, Left/Right
-scrub, 6/7 navigate anomalies, 8 restarts. T is MuJoCo's transparency toggle.
+F8/F9/F10 toggle pose/body-velocity/joint-velocity ghosts. F12 selects a body
+(or use --body). Space pauses, Left/Right scrub, 6/7 navigate anomalies,
+8 restarts. C/F/T retain MuJoCo's contact-point/contact-force/transparency toggles.
 
 Ghosts are kinematic reconstructions, NOT physical simulations. Recorded
 states are never repaired. Unknown source frame/COM mappings remain UNVERIFIED.
@@ -20,6 +20,7 @@ import argparse
 from collections import deque
 import json
 from pathlib import Path
+import sys
 import time
 
 import mujoco
@@ -53,7 +54,7 @@ KEY_HELP = (
     "Space pause | Arrows scrub | 6/7 anomalies\n"
     "F8 pose | F9 body velocity | F10 joint velocity\n"
     "F12 body (--body)\n"
-    "8 restart | T transparency (MuJoCo)"
+    "8 restart | C contacts / F forces / T transparency (native)"
 )
 COLORS = {
     "pose": (0.05, 0.85, 1.0, 1.0),
@@ -78,6 +79,64 @@ def check_viewer_shortcuts():
     if conflicts:
         raise RuntimeError(
             f"Replay shortcuts conflict with MuJoCo key codes: {sorted(conflicts)}"
+        )
+
+
+def enqueue_replay_key(events, key):
+    """Native keys are already handled by MuJoCo: never toggle them again."""
+    if key in KEY_BINDINGS:
+        events.append(key)
+
+
+def contact_status(state, option):
+    """Explain native visibility without changing flags or inventing contacts."""
+    points = bool(option.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT])
+    forces = bool(option.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE])
+    lines = [
+        f"C contacts: {'ON' if points else 'off'} | F forces: {'ON' if forces else 'off'} | ncon={state.data.ncon}"
+    ]
+    if (points or forces) and not state.data.ncon:
+        lines.append("No contacts at this frame; no contact graphics.")
+    elif forces:
+        lines.append("Forces: MuJoCo pose solve, NOT recorded NPZ forces.")
+    return "\n".join(lines)
+
+
+def warn_motion_report(path, report):
+    """Emit once per file, before opening a window; retain machine exit codes."""
+
+    def warn(message):
+        print(f"[WARNING] {message}", file=sys.stderr, flush=True)
+
+    if report.failed:
+        frame, body = report.worst()
+        warn(f"NPZ data consistency check FAILED: {path}")
+        warn(
+            f"{len(report.anomaly_frames)} anomalous frames; worst frame={frame} "
+            f"({frame / report.view.fps:.3f}s), body={report.view.body_names[body]}"
+        )
+        failed_metrics = [
+            key for key, metric in report.base.metrics.items() if metric.failed.any()
+        ]
+        if failed_metrics:
+            warn("Failed numerical checks: " + ", ".join(failed_metrics))
+        for name, ghost in report.ghosts.items():
+            for label, error, limit, scale, unit in (
+                ("position", ghost.position_error, ghost.position_tol, 100, "cm"),
+                ("angle", ghost.angle_error, ghost.angle_tol, 180 / np.pi, "deg"),
+            ):
+                if not np.any(error > limit):
+                    continue
+                f, b = np.unravel_index(np.nanargmax(error), error.shape)
+                warn(
+                    f"{name} {label}: body={report.view.body_names[b]}, frame={f}, "
+                    f"peak={error[f, b] * scale:.3f}{unit}, limit={limit * scale:g}{unit}"
+                )
+        warn("Replay remains available for diagnosis; use 6/7 to inspect anomalies.")
+    if not report.complete:
+        warn(
+            f"NPZ verification INCOMPLETE: {path}; unknown mapping/fields or "
+            "insufficient history. Unverified data is not a PASS."
         )
 
 
@@ -227,7 +286,7 @@ def draw_ghosts(scene, state, report, enabled, body):
     )
 
 
-def ghost_texts(state, report, enabled, body, paused, notice=""):
+def ghost_texts(state, report, enabled, body, paused, notice="", native_status=""):
     f = state.frame
     n = len(report.view.data.joint_pos)
     lines = [
@@ -245,6 +304,8 @@ def ghost_texts(state, report, enabled, body, paused, notice=""):
         lines.append(
             f"Unsupported NPZ fields: {len(report.unsupported_fields)} (see report)"
         )
+    if native_status:
+        lines.extend(native_status.splitlines())
     labels = [report.view.body_names[body]]
     values = ["position / angle vs main FK"]
     for name, ghost in report.ghosts.items():
@@ -305,7 +366,7 @@ def run_viewer(model, reports, args):
     )
     print(KEY_HELP)
     with mujoco.viewer.launch_passive(
-        model, state.data, key_callback=events.append
+        model, state.data, key_callback=lambda key: enqueue_replay_key(events, key)
     ) as viewer:
         viewer.cam.lookat[:] = state.data.xpos[state.root]
         viewer.cam.distance = 3.5
@@ -350,7 +411,10 @@ def run_viewer(model, reports, args):
             with viewer.lock():
                 viewer.user_scn.ngeom = 0
                 draw_ghosts(viewer.user_scn, state, report, enabled, body)
-            viewer.set_texts(ghost_texts(state, report, enabled, body, paused, notice))
+                native_status = contact_status(state, viewer.opt)
+            viewer.set_texts(
+                ghost_texts(state, report, enabled, body, paused, notice, native_status)
+            )
             viewer.sync()
             if not paused and not state.advance():
                 if args.loop:
@@ -506,6 +570,7 @@ def main(argv=None):
         print(
             "Velocity ghosts need a full window; shared root pose is not independent evidence.\nConverted-file checks do NOT certify original source fields. Overlap does NOT prove physical feasibility."
         )
+        warn_motion_report(path, reports[args.view])
         if args.report:
             args.report.write_text(
                 json.dumps(

@@ -27,6 +27,8 @@ dependencies = [
 [project.scripts]
 engineai-train = "engineai_rl_unilab.cli:train_main"
 engineai-eval = "engineai_rl_unilab.cli:eval_main"
+engineai-convert-npz = "engineai_rl_unilab.tasks.t800.convert_npz:main"
+engineai-replay = "engineai_rl_unilab.tasks.t800.replay:main"
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

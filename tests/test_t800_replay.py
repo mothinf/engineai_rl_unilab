@@ -11,24 +11,25 @@ import numpy as np
 import pytest
 
 from engineai_rl_unilab.tasks.t800.motion_ghosts import (
-    GHOST_NAMES,
-    build_ghosts,
+    build_ghost,
     quat_mul,
 )
 from engineai_rl_unilab.tasks.t800.motion_validation import load_views, validate_motion
 from engineai_rl_unilab.tasks.t800.replay import (
-    COLORS,
-    ERROR_COLOR,
+    GHOST_COLOR,
+    GHOST_NODE_RADIUS,
+    GHOST_RADIUS,
+    GhostErrorLogger,
     KEY_BINDINGS,
     KEY_HELP,
     ReplayState,
     check_viewer_shortcuts,
     contact_status,
-    draw_ghosts,
+    draw_ghost,
     enqueue_replay_key,
+    ghost_error_log,
     ghost_texts,
     main,
-    marker_endpoints,
     run_viewer,
     warn_motion_report,
 )
@@ -49,7 +50,7 @@ def loaded():
     reports = {}
     for name, path in (("old", OLD), ("v2", V2)):
         _, views = load_views(path, MODEL, names, "mujoco")
-        reports[name] = build_ghosts(validate_motion(views["file"], model), model)
+        reports[name] = build_ghost(validate_motion(views["file"], model), model)
     return model, reports
 
 
@@ -80,37 +81,62 @@ def test_random_access_pose_without_physics(loaded, monkeypatch):
             state.set_frame(frame)
 
 
-def test_scene_geometry_error_lines_and_orientation_markers(loaded):
+def test_scene_is_only_thick_cyan_bones_and_spherical_nodes(loaded):
     model, reports = loaded
-    body = model.body("LINK_ANKLE_ROLL_L").id
-    for key, report in reports.items():
+    for report in reports.values():
         state = ReplayState(model, report.view)
         state.set_frame(799)
         scene = mujoco.MjvScene(model, maxgeom=1000)
-        draw_ghosts(scene, state, report, set(GHOST_NAMES), body)
-        geoms = scene.geoms[: scene.ngeom]
-        assert 0 < scene.ngeom < 1000
-        # Selected-body name is in the overlay, never obscuring the foot itself.
-        assert not any(g.label for g in geoms)
-        assert not any(g.type == mujoco.mjtGeom.mjGEOM_ARROW for g in geoms)
-        red = [g for g in geoms if np.allclose(g.rgba, ERROR_COLOR)]
-        assert bool(red) == (key == "old")
-        for color in COLORS.values():
-            assert any(np.allclose(g.rgba, color) for g in geoms)
-        for enabled in (set(), {"pose"}, {"body-velocity"}, {"joint-velocity"}):
-            scene.ngeom = 0
-            draw_ghosts(scene, state, report, enabled, body)
-            for name, color in COLORS.items():
-                exists = any(
-                    np.allclose(g.rgba, color) for g in scene.geoms[: scene.ngeom]
-                )
-                assert exists == (name in enabled)
-    p = np.array([1.0, 2.0, 3.0])
-    q = np.array([1.0, 0.0, 0.0, 0.0])
-    twist = np.array([np.cos(0.4), np.sin(0.4), 0.0, 0.0])
-    a, b = marker_endpoints(p, q), marker_endpoints(p, quat_mul(twist, q))
-    np.testing.assert_allclose(a[0], b[0])  # same bone-axis direction
-    assert np.linalg.norm(a[1] - b[1]) > 0.02  # transverse arm reveals roll
+        draw_ghost(scene, state, report, True)
+        assert model.nbody - 1 < scene.ngeom <= 2 * model.nbody - 3
+        nodes = []
+        for geom in scene.geoms[: scene.ngeom]:
+            assert geom.type in (
+                mujoco.mjtGeom.mjGEOM_CAPSULE,
+                mujoco.mjtGeom.mjGEOM_SPHERE,
+            )
+            assert np.allclose(geom.rgba, GHOST_COLOR)
+            if geom.type == mujoco.mjtGeom.mjGEOM_SPHERE:
+                assert geom.size[0] == pytest.approx(GHOST_NODE_RADIUS)
+                nodes.append(geom.pos.copy())
+            else:
+                assert geom.size[0] == pytest.approx(GHOST_RADIUS)
+            assert GHOST_RADIUS > 0.003
+            assert not geom.label
+        np.testing.assert_allclose(nodes, report.ghost.position[799, 1:])
+        assert GHOST_NODE_RADIUS > GHOST_RADIUS
+        assert GHOST_COLOR == (0.0, 1.0, 1.0, 1.0)
+        scene.ngeom = 0
+        draw_ghost(scene, state, report, False)
+        assert scene.ngeom == 0
+        state.set_frame(0)
+        draw_ghost(scene, state, report, True)
+        assert scene.ngeom == 0  # no history, no fake zero-length skeleton
+
+
+def test_pure_rotation_errors_are_reported_without_axes(loaded):
+    from dataclasses import replace
+    from unilab.tasks.motion_tracking.common.motion_loader import MotionData
+    from engineai_rl_unilab.tasks.t800.motion_npz import STATE_FIELDS
+
+    model, reports = loaded
+    good = reports["v2"]
+    data = MotionData(**{k: getattr(good.view.data, k).copy() for k in STATE_FIELDS})
+    data.body_quat_w[775:825, 7] = quat_mul(
+        np.array([np.cos(0.6), np.sin(0.6), 0, 0]), data.body_quat_w[775:825, 7]
+    )
+    view = replace(good.view, data=data)
+    bad = build_ghost(validate_motion(view, model), model)
+    assert bad.failed and bad.ghost.angle_error[799, 7] > 1
+    scenes = []
+    for report in (good, bad):
+        state = ReplayState(model, report.view)
+        state.set_frame(799)
+        scene = mujoco.MjvScene(model, maxgeom=1000)
+        draw_ghost(scene, state, report, True)
+        scenes.append(np.array([g.pos.copy() for g in scene.geoms[: scene.ngeom]]))
+    np.testing.assert_array_equal(*scenes)  # no invented orientation markers
+    assert 799 in bad.anomaly_frames
 
 
 def test_cli_reports_defaults_removed_options_and_coverage(tmp_path, capsys):
@@ -122,12 +148,9 @@ def test_cli_reports_defaults_removed_options_and_coverage(tmp_path, capsys):
     assert "body_linear_fd" in warnings and "body-velocity position" in warnings
     assert "frame=" in warnings and "body=LINK_" in warnings
     payload = json.loads(output.read_text())["file"]
-    assert (
-        payload["ghosts"]["layers"]["body-velocity"]["entities"]["LINK_ANKLE_ROLL_L"][
-            "status"
-        ]
-        == "FAIL"
-    )
+    assert "ghosts" not in payload
+    assert payload["ghost"]["type"] == "body-velocity"
+    assert payload["ghost"]["entities"]["LINK_ANKLE_ROLL_L"]["status"] == "FAIL"
     assert main([*args, "--npz-file", str(V2)]) == 0
     assert "[WARNING]" not in capsys.readouterr().err
     assert json.loads(output.read_text())["file"]["status"] == "PASS"
@@ -176,6 +199,9 @@ def test_cli_reports_defaults_removed_options_and_coverage(tmp_path, capsys):
         ["--vector-scale", "1"],
         ["--joint", "x"],
         ["--view", "reference"],
+        ["--ghosts", "pose"],
+        ["--ghosts", "joint-velocity"],
+        ["--ghosts", "all"],
     ):
         with pytest.raises(SystemExit) as error:
             main(removed)
@@ -256,11 +282,73 @@ def run_keys(monkeypatch, model, reports, batches, **options):
         play=False,
         speed=1,
         loop=False,
-        ghosts="all",
+        no_ghost=False,
+        no_error_log=False,
     )
     vars(args).update(options)
     run_viewer(model, reports, args)
     return viewer.snapshots
+
+
+def test_window_error_log_mm_and_pause_deduplication(loaded, monkeypatch, capsys):
+    model, reports = loaded
+    for name in ("old", "v2"):
+        report = reports[name]
+        message = ghost_error_log(report, 799)
+        expected = np.max(report.ghost.position_error[799, 1:]) * 1000
+        assert f"最大位置偏差={expected:.1f} mm" in message
+        assert "阈值=30.0 mm" in message and "积分窗口=0.200s" in message
+        assert ("[超限]" if name == "old" else "[位置偏差正常]") in message
+        assert "[等待]" in ghost_error_log(report, 0)
+    monkeypatch.setattr(
+        "engineai_rl_unilab.tasks.t800.replay.time.monotonic", lambda: 0.0
+    )
+    run_keys(
+        monkeypatch,
+        model,
+        {"file": reports["old"]},
+        [[], [], [262], [], [263], [301]],
+        start_frame=799,
+        no_ghost=True,
+    )
+    logs = [
+        line for line in capsys.readouterr().out.splitlines() if "[NPZ drift][" in line
+    ]
+    assert len(logs) == 1  # Fast scrubbing/body selection cannot bypass the rate limit.
+    assert "frame=799" in logs[0]
+
+
+def test_disable_error_log_keeps_skeleton_and_validation(loaded, monkeypatch, capsys):
+    model, reports = loaded
+    snapshots = run_keys(
+        monkeypatch,
+        model,
+        {"file": reports["old"]},
+        [[], [], [262]],
+        no_error_log=True,
+    )
+    assert "[NPZ drift]" not in capsys.readouterr().out
+    assert all(snapshot[1] > 0 for snapshot in snapshots)
+    assert main(["--npz-file", str(OLD), "--check-only", "--no-error-log"]) == 1
+    assert "[WARNING] NPZ data consistency check FAILED" in capsys.readouterr().err
+
+
+def test_error_logger_retains_spikes_and_flushes_once_when_paused(loaded):
+    _, reports = loaded
+    report = reports["old"]
+    logger = GhostErrorLogger(report)
+    assert "[等待]" in logger.update(0, 0.0)
+    frames = range(700, 800)
+    for i, frame in enumerate(frames):
+        assert logger.update(frame, (i + 1) / 101) is None
+    peak_frame = max(frames, key=lambda f: np.max(report.ghost.position_error[f, 1:]))
+    assert logger.update(799, 1.0) == ghost_error_log(report, peak_frame)
+    assert logger.update(799, 2.0) is None  # No repeated output while paused.
+    assert "[等待]" in logger.update(
+        0, 3.0
+    )  # Loop/restart never integrates across clips.
+    assert logger.update(799, 3.1) is None
+    assert "[超限]" in logger.update(799, 4.0)
 
 
 def test_key_dispatch_and_native_independence(loaded, monkeypatch):
@@ -286,13 +374,13 @@ def test_key_dispatch_and_native_independence(loaded, monkeypatch):
         [32],
     ]
     snapshots = run_keys(monkeypatch, model, views, batches)
-    assert "pose [off]" in snapshots[1][0]
+    assert "body-velocity [off]" in snapshots[1][0]
     assert "body-velocity [off]" in snapshots[2][0]
-    assert "joint-velocity [off]" in snapshots[3][0] and snapshots[3][1] == 1
-    assert "pose [on]" in snapshots[4][0]
+    assert "body-velocity [off]" in snapshots[3][0] and snapshots[3][1] == 0
+    assert "body-velocity [on]" in snapshots[4][0]
     assert "LINK_FOOT_L" in snapshots[5][0]
     assert snapshots[5][:2] == snapshots[6][:2]  # F11 is no longer a custom key
-    assert 300 not in KEY_BINDINGS
+    assert not {298, 299, 300}.intersection(KEY_BINDINGS)
     assert "frame 101/" in snapshots[7][0] and "frame 100/" in snapshots[8][0]
     frames = old.anomaly_frames
     following = frames[np.searchsorted(frames, 100, side="right") % len(frames)]
@@ -349,25 +437,21 @@ def test_native_shortcut_guard_and_partial_overlays(loaded, monkeypatch, isaac_n
     )
     _, views = load_views(isaac_npz, MODEL, names, "t800_isaac_v1")
     for view in views.values():
-        report = build_ghosts(
+        report = build_ghost(
             validate_motion(view, model), model, present_fields=("extra",)
         )
         state = ReplayState(model, view)
         for frame, body in ((0, 1), (20, 7)):
             state.set_frame(frame)
-            for _, _, left, right in ghost_texts(
-                state, report, set(GHOST_NAMES), body, True
-            ):
+            for _, _, left, right in ghost_texts(state, report, True, body, True):
                 assert (
                     len(left) < mujoco.mjMAXOVERLAY and len(right) < mujoco.mjMAXOVERLAY
                 )
         scene = mujoco.MjvScene(model, maxgeom=1000)
-        draw_ghosts(scene, state, report, {"body-velocity"}, 7)
+        draw_ghost(scene, state, report, True)
         if view.notes:
-            assert (
-                "UNVERIFIED"
-                in ghost_texts(state, report, set(GHOST_NAMES), 7, True)[1][3]
-            )
+            assert "UNVERIFIED" in ghost_texts(state, report, True, 7, True)[1][3]
+            assert "UNVERIFIED" in ghost_error_log(report, 20)
 
 
 @pytest.mark.parametrize("key", [ord("C"), ord("F")])
@@ -405,7 +489,10 @@ def test_native_contacts_survive_ghost_toggles_and_frame_changes(
     assert (
         "No contacts at this frame" if play else "NOT recorded NPZ forces"
     ) in snapshots[2][0]
-    assert "pose [on]" in snapshots[2][0] and "pose [off]" in snapshots[3][0]
+    assert (
+        "body-velocity [on]" in snapshots[2][0]
+        and "body-velocity [off]" in snapshots[3][0]
+    )
 
 
 def test_native_contact_geometry_coexists_with_ghosts(loaded):
@@ -434,7 +521,7 @@ def test_native_contact_geometry_coexists_with_ghosts(loaded):
         )
         native_count = scene.ngeom
         native_positions = np.array([g.pos.copy() for g in scene.geoms[:native_count]])
-        draw_ghosts(scene, state, report, set(GHOST_NAMES), 7)
+        draw_ghost(scene, state, report, True)
         np.testing.assert_array_equal(
             native_positions, [g.pos for g in scene.geoms[:native_count]]
         )
@@ -448,7 +535,7 @@ def test_ghost_only_failures_also_warn(loaded, capsys):
     from engineai_rl_unilab.tasks.t800.motion_ghosts import GhostOptions
 
     model, reports = loaded
-    report = build_ghosts(reports["v2"].base, model, GhostOptions(position_tol=0.0001))
+    report = build_ghost(reports["v2"].base, model, GhostOptions(position_tol=0.0001))
     assert not report.base.failed and report.failed
     warn_motion_report(V2, report)
     warnings = capsys.readouterr().err
@@ -462,3 +549,20 @@ def test_viewer_receives_warning_before_launch(monkeypatch, capsys):
 
     monkeypatch.setattr("engineai_rl_unilab.tasks.t800.replay.run_viewer", viewer)
     assert main(["--npz-file", str(OLD), "--play"]) == 1
+
+
+def test_hidden_skeleton_keeps_validation_and_can_be_enabled(
+    loaded, monkeypatch, capsys
+):
+    assert main(["--npz-file", str(OLD), "--no-ghost", "--check-only"]) == 1
+    assert "[WARNING]" in capsys.readouterr().err
+    model, reports = loaded
+    snapshots = run_keys(
+        monkeypatch,
+        model,
+        {"file": reports["v2"]},
+        [[], [297]],
+        no_ghost=True,
+    )
+    assert snapshots[0][1] == 0 and "body-velocity [off]" in snapshots[0][0]
+    assert snapshots[1][1] > 0 and "body-velocity [on]" in snapshots[1][0]

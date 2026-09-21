@@ -1,12 +1,12 @@
-"""T800 NPZ replay: pose-driven robot plus three independent motion ghosts.
+"""T800 NPZ replay: pose-driven robot plus one cyan body-velocity skeleton.
 
 Examples (from the repository root)::
 
     engineai-replay --format mujoco --npz-file motion.npz --play --loop
-    engineai-replay --ghosts body-velocity --ghost-window 0.2
+    engineai-replay --ghost-window 0.2
     engineai-replay --check-only --report report.json
 
-F8/F9/F10 toggle pose/body-velocity/joint-velocity ghosts. F12 selects a body
+F8 toggles the body-velocity skeleton. F12 selects a body
 (or use --body). Space pauses, Left/Right scrub, 6/7 navigate anomalies,
 8 restarts. C/F/T retain MuJoCo's contact-point/contact-force/transparency toggles.
 
@@ -32,7 +32,7 @@ from unilab.utils.rotation import np_quat_apply_inverse
 from engineai_rl_unilab.assets import ASSETS_ROOT, ensure_t800_assets
 from engineai_rl_unilab.cli import CONF_ROOT
 
-from .motion_ghosts import GHOST_NAMES, GhostOptions, build_ghosts
+from .motion_ghosts import GHOST_NAME, GhostOptions, build_ghost
 from .motion_validation import Tolerances, load_views, validate_motion
 
 
@@ -42,9 +42,7 @@ KEY_BINDINGS = {
     32: "pause",
     262: "next_frame",
     263: "previous_frame",
-    297: "pose",
-    298: "body-velocity",
-    299: "joint-velocity",
+    297: "ghost",
     301: "body",
     ord("6"): "previous_anomaly",
     ord("7"): "next_anomaly",
@@ -52,19 +50,13 @@ KEY_BINDINGS = {
 }
 KEY_HELP = (
     "Space pause | Arrows scrub | 6/7 anomalies\n"
-    "F8 pose | F9 body velocity | F10 joint velocity\n"
+    "F8 cyan skeleton on/off\n"
     "F12 body (--body)\n"
     "8 restart | C contacts / F forces / T transparency (native)"
 )
-COLORS = {
-    "pose": (0.05, 0.85, 1.0, 1.0),
-    "body-velocity": (1.0, 0.55, 0.06, 1.0),
-    "joint-velocity": (0.85, 0.35, 1.0, 1.0),
-}
-BASE_COLOR = (0.8, 0.85, 0.88, 0.8)
-ERROR_COLOR = (1.0, 0.18, 0.15, 1.0)
-# Unequal local-frame arms expose axial twists invisible in origin-only skeletons.
-MARKER_AXES = np.diag([0.065, 0.045, 0.025])
+GHOST_COLOR = (0.0, 1.0, 1.0, 1.0)
+GHOST_RADIUS = 0.007  # 7 mm radius; solid, thicker than the former dashed skeleton.
+GHOST_NODE_RADIUS = 0.014  # Small spheres distinguish nodes from the thick bones.
 
 
 def check_viewer_shortcuts():
@@ -120,18 +112,18 @@ def warn_motion_report(path, report):
         ]
         if failed_metrics:
             warn("Failed numerical checks: " + ", ".join(failed_metrics))
-        for name, ghost in report.ghosts.items():
-            for label, error, limit, scale, unit in (
-                ("position", ghost.position_error, ghost.position_tol, 100, "cm"),
-                ("angle", ghost.angle_error, ghost.angle_tol, 180 / np.pi, "deg"),
-            ):
-                if not np.any(error > limit):
-                    continue
-                f, b = np.unravel_index(np.nanargmax(error), error.shape)
-                warn(
-                    f"{name} {label}: body={report.view.body_names[b]}, frame={f}, "
-                    f"peak={error[f, b] * scale:.3f}{unit}, limit={limit * scale:g}{unit}"
-                )
+        name, ghost = GHOST_NAME, report.ghost
+        for label, error, limit, scale, unit in (
+            ("position", ghost.position_error, ghost.position_tol, 100, "cm"),
+            ("angle", ghost.angle_error, ghost.angle_tol, 180 / np.pi, "deg"),
+        ):
+            if not np.any(error > limit):
+                continue
+            f, b = np.unravel_index(np.nanargmax(error), error.shape)
+            warn(
+                f"{name} {label}: body={report.view.body_names[b]}, frame={f}, "
+                f"peak={error[f, b] * scale:.3f}{unit}, limit={limit * scale:g}{unit}"
+            )
         warn("Replay remains available for diagnosis; use 6/7 to inspect anomalies.")
     if not report.complete:
         warn(
@@ -182,108 +174,53 @@ class ReplayState:
         return True
 
 
-def _geom(scene, kind, start, end=None, color=BASE_COLOR, width=0.002, label=""):
-    if scene.ngeom >= scene.maxgeom:
-        raise RuntimeError("Ghost scene capacity exhausted")
-    geom = scene.geoms[scene.ngeom]
-    mujoco.mjv_initGeom(
-        geom,
-        kind,
-        np.full(3, width),
-        np.asarray(start, dtype=float),
-        np.eye(3).ravel(),
-        np.asarray(color, dtype=np.float32),
-    )
-    if end is not None:
-        mujoco.mjv_connector(geom, kind, width, np.asarray(start), np.asarray(end))
-    geom.label = label
-    scene.ngeom += 1
-
-
-def _segment(scene, start, end, color, style, width):
-    if np.linalg.norm(end - start) < 1e-8:
+def draw_ghost(scene, state, report, enabled):
+    """Append cyan bones and spherical body-origin nodes; no axes or error lines."""
+    if not enabled:
         return
-    if style == "joint-velocity":
-        _geom(scene, mujoco.mjtGeom.mjGEOM_LINE, start, end, color, 1)
-        for fraction in (0.15, 0.5, 0.85):
-            _geom(
-                scene,
-                mujoco.mjtGeom.mjGEOM_SPHERE,
-                start + fraction * (end - start),
-                color=color,
-                width=width * 1.5,
-            )
-    elif style == "body-velocity":
-        for lo, hi in ((0, 0.22), (0.36, 0.58), (0.72, 1)):
-            _geom(
-                scene,
-                mujoco.mjtGeom.mjGEOM_CAPSULE,
-                start + lo * (end - start),
-                start + hi * (end - start),
-                color,
-                width,
-            )
-    else:
-        _geom(scene, mujoco.mjtGeom.mjGEOM_CAPSULE, start, end, color, width)
-
-
-def marker_endpoints(position, quaternion):
-    matrix = np.empty(9)
-    q = quaternion.astype(float) / np.linalg.norm(quaternion)
-    mujoco.mju_quat2Mat(matrix, q)
-    return position + MARKER_AXES @ matrix.reshape(3, 3).T
-
-
-def draw_ghosts(scene, state, report, enabled, body):
-    """Only overlays are added: no physical bodies, scale changes or projection."""
-    f = state.frame
-    base_p, base_q = report.base.fk.body_pos_w[f], report.base.fk.body_quat_w[f]
-    if enabled:
-        for i in range(1, state.model.nbody):
-            parent = state.model.body_parentid[i]
-            if parent:
-                _segment(scene, base_p[parent], base_p[i], BASE_COLOR, "base", 0.0015)
-            for endpoint in marker_endpoints(base_p[i], base_q[i]):
-                _segment(scene, base_p[i], endpoint, BASE_COLOR, "base", 0.0015)
-    for name in GHOST_NAMES:
-        if name not in enabled:
+    ghost, f = report.ghost, state.frame
+    for body in range(1, state.model.nbody):
+        if not ghost.drawable[f, body]:
             continue
-        ghost, color = report.ghosts[name], COLORS[name]
-        width = {"pose": 0.002, "body-velocity": 0.003, "joint-velocity": 0.0025}[name]
-        for i in range(1, state.model.nbody):
-            if not ghost.drawable[f, i]:
-                continue
-            p, q = ghost.position[f, i], ghost.quaternion[f, i]
-            parent = state.model.body_parentid[i]
-            if parent and ghost.drawable[f, parent]:
-                _segment(scene, ghost.position[f, parent], p, color, name, width)
-            endpoints = marker_endpoints(p, q)
-            for endpoint in endpoints:
-                _segment(scene, p, endpoint, color, "marker", width)
-            if ghost.hotspots[f, i]:
-                if ghost.position_error[f, i] > ghost.position_tol:
-                    _geom(
-                        scene, mujoco.mjtGeom.mjGEOM_LINE, base_p[i], p, ERROR_COLOR, 2
-                    )
-                if ghost.angle_error[f, i] > ghost.angle_tol:
-                    base_ends = marker_endpoints(base_p[i], base_q[i])
-                    aligned = base_ends - base_p[i] + p
-                    axis = int(np.argmax(np.linalg.norm(endpoints - aligned, axis=-1)))
-                    _geom(
-                        scene,
-                        mujoco.mjtGeom.mjGEOM_LINE,
-                        aligned[axis],
-                        endpoints[axis],
-                        ERROR_COLOR,
-                        2,
-                    )
-    _geom(
-        scene,
-        mujoco.mjtGeom.mjGEOM_SPHERE,
-        base_p[body],
-        color=BASE_COLOR,
-        width=0.006,
-    )
+        if scene.ngeom >= scene.maxgeom:
+            raise RuntimeError("Ghost scene capacity exhausted")
+        node = scene.geoms[scene.ngeom]
+        mujoco.mjv_initGeom(
+            node,
+            mujoco.mjtGeom.mjGEOM_SPHERE,
+            np.full(3, GHOST_NODE_RADIUS),
+            ghost.position[f, body],
+            np.eye(3).ravel(),
+            np.asarray(GHOST_COLOR, dtype=np.float32),
+        )
+        node.label = ""
+        scene.ngeom += 1
+        parent = state.model.body_parentid[body]
+        if not parent or not (ghost.drawable[f, body] and ghost.drawable[f, parent]):
+            continue
+        start, end = ghost.position[f, parent], ghost.position[f, body]
+        if np.linalg.norm(end - start) < 1e-8:
+            continue
+        if scene.ngeom >= scene.maxgeom:
+            raise RuntimeError("Ghost scene capacity exhausted")
+        geom = scene.geoms[scene.ngeom]
+        mujoco.mjv_initGeom(
+            geom,
+            mujoco.mjtGeom.mjGEOM_CAPSULE,
+            np.full(3, GHOST_RADIUS),
+            start,
+            np.eye(3).ravel(),
+            np.asarray(GHOST_COLOR, dtype=np.float32),
+        )
+        mujoco.mjv_connector(
+            geom,
+            mujoco.mjtGeom.mjGEOM_CAPSULE,
+            GHOST_RADIUS,
+            start,
+            end,
+        )
+        geom.label = ""
+        scene.ngeom += 1
 
 
 def ghost_texts(state, report, enabled, body, paused, notice="", native_status=""):
@@ -294,9 +231,9 @@ def ghost_texts(state, report, enabled, body, paused, notice="", native_status="
         f"frame {f}/{n - 1} ({f / report.view.fps:.2f}s) | {'PAUSED' if paused else 'PLAYING'}",
         f"Window {report.window_frames / report.view.fps:.3f}s ({report.window_frames} frames) | scale 1:1",
         f"Velocity limits {report.options.position_tol * 100:g}cm / {report.options.angle_tol_deg:g}deg",
-        "Pose: cyan solid | Body: orange dashed",
-        "Joint: purple dotted | Main FK: gray",
-        "Red connectors: over tolerance; no physics",
+        "Cyan skeleton: integrated body velocity",
+        "Rotation/joint errors: see numeric checks",
+        "Pose-only replay; no physics stepping",
     ]
     if report.view.notes:
         lines.append("Source frame/COM mapping UNVERIFIED")
@@ -308,17 +245,15 @@ def ghost_texts(state, report, enabled, body, paused, notice="", native_status="
         lines.extend(native_status.splitlines())
     labels = [report.view.body_names[body]]
     values = ["position / angle vs main FK"]
-    for name, ghost in report.ghosts.items():
-        labels.append(name + (" [on]" if name in enabled else " [off]"))
-        if name != "pose" and f < report.window_frames:
-            value = f"WARM-UP: need frame {report.window_frames}"
-        elif not ghost.drawable[f, body]:
-            value = "UNVERIFIED frame/COM mapping"
-        elif body == report.root and name != "body-velocity":
-            value = "SHARED ROOT INPUT (not a check)"
-        else:
-            value = f"{ghost.position_error[f, body] * 100:.2f}cm / {np.rad2deg(ghost.angle_error[f, body]):.2f}deg"
-        values.append(value)
+    ghost = report.ghost
+    labels.append("body-velocity" + (" [on]" if enabled else " [off]"))
+    if f < report.window_frames:
+        value = f"WARM-UP: need frame {report.window_frames}"
+    elif not ghost.drawable[f, body]:
+        value = "UNVERIFIED frame/COM mapping"
+    else:
+        value = f"{ghost.position_error[f, body] * 100:.2f}cm / {np.rad2deg(ghost.angle_error[f, body]):.2f}deg"
+    values.append(value)
     if not report.complete:
         labels.append("Coverage")
         values.append("PARTIAL: see terminal/JSON")
@@ -333,6 +268,62 @@ def ghost_texts(state, report, enabled, body, paused, notice="", native_status="
             "",
         ),
     ]
+
+
+def ghost_peak(report, frame):
+    """Maximum comparable non-world body position residual in metres."""
+    valid = report.ghost.drawable[frame].copy()
+    valid[0] = False
+    ids = np.flatnonzero(valid)
+    if frame < report.window_frames or not len(ids):
+        return -1.0, None
+    body = int(ids[np.argmax(report.ghost.position_error[frame, ids])])
+    return float(report.ghost.position_error[frame, body]), body
+
+
+def ghost_error_log(report, frame):
+    """One position metric only; this is not an overall NPZ pass verdict."""
+    error, body = ghost_peak(report, frame)
+    prefix = "[NPZ drift]"
+    if frame < report.window_frames:
+        return f"{prefix}[等待] frame={frame} 历史不足，暂不计算位置偏差"
+    if body is None:
+        return f"{prefix}[UNVERIFIED] frame={frame} 无可比较部件"
+    tol = report.options.position_tol
+    complete = np.all(report.ghost.drawable[frame, 1:])
+    status = "超限" if error > tol else "位置偏差正常" if complete else "UNVERIFIED"
+    coverage = "" if complete else " | 仅部分部件可比较，不能判定整体正常"
+    return (
+        f"{prefix}[{status}] 最大位置偏差={error * 1000:.1f} mm "
+        f"| 阈值={tol * 1000:.1f} mm | 部件={report.view.body_names[body]} "
+        f"| frame={frame} ({frame / report.view.fps:.2f}s) "
+        f"| 积分窗口={report.window_frames / report.view.fps:.3f}s{coverage}"
+    )
+
+
+class GhostErrorLogger:
+    """At most one line/second; retain the peak of all newly displayed frames."""
+
+    def __init__(self, report):
+        self.report = report
+        self.last_frame = None
+        self.last_time = None
+        self.pending = None
+
+    def update(self, frame, now):
+        if frame != self.last_frame:
+            candidate = (ghost_peak(self.report, frame)[0], frame)
+            if self.pending is None or candidate[0] >= self.pending[0]:
+                self.pending = candidate
+            self.last_frame = frame
+        if self.pending is not None and (
+            self.last_time is None or now - self.last_time >= 1.0
+        ):
+            message = ghost_error_log(self.report, self.pending[1])
+            self.pending = None
+            self.last_time = now
+            return message
+        return None
 
 
 def run_viewer(model, reports, args):
@@ -353,18 +344,17 @@ def run_viewer(model, reports, args):
     )
     state.set_frame(start)
     paused, notice = not args.play, ""
-    enabled = set(
-        GHOST_NAMES
-        if args.ghosts == "all"
-        else ()
-        if args.ghosts == "none"
-        else (args.ghosts,)
-    )
+    enabled = not args.no_ghost
+    error_logger = None if args.no_error_log else GhostErrorLogger(report)
     events = deque()
     print(
         "Opening ghost viewer (paused by default); failing clips start at their worst frame."
     )
     print(KEY_HELP)
+    if error_logger is not None:
+        print(
+            "[NPZ drift] 每秒最多一条：本次输出间隔内经过帧的最大位置偏差；不是整份 NPZ 的合格结论。"
+        )
     with mujoco.viewer.launch_passive(
         model, state.data, key_callback=lambda key: enqueue_replay_key(events, key)
     ) as viewer:
@@ -380,8 +370,8 @@ def run_viewer(model, reports, args):
                     notice = ""
                 if action == "pause":
                     paused = not paused
-                elif action in GHOST_NAMES:
-                    enabled.symmetric_difference_update((action,))
+                elif action == "ghost":
+                    enabled = not enabled
                 elif action == "body":
                     body = body % (model.nbody - 1) + 1
                 elif action == "restart":
@@ -408,9 +398,13 @@ def run_viewer(model, reports, args):
                         int(np.clip(target, 0, len(report.view.data.joint_pos) - 1))
                     )
                     paused = True
+            if error_logger is not None:
+                error_message = error_logger.update(state.frame, time.monotonic())
+                if error_message is not None:
+                    print(error_message, flush=True)
             with viewer.lock():
                 viewer.user_scn.ngeom = 0
-                draw_ghosts(viewer.user_scn, state, report, enabled, body)
+                draw_ghost(viewer.user_scn, state, report, enabled)
                 native_status = contact_status(state, viewer.opt)
             viewer.set_texts(
                 ghost_texts(state, report, enabled, body, paused, notice, native_status)
@@ -453,7 +447,14 @@ def main(argv=None):
         help="Only recorded file data is inspected; convert Isaac data offline first for training",
     )
     parser.add_argument(
-        "--ghosts", choices=("all", *GHOST_NAMES, "none"), default="all"
+        "--no-ghost",
+        action="store_true",
+        help="Hide the cyan skeleton; checks still run",
+    )
+    parser.add_argument(
+        "--no-error-log",
+        action="store_true",
+        help="Disable periodic position-error logs; validation and warnings remain enabled",
     )
     parser.add_argument(
         "--ghost-window",
@@ -541,7 +542,7 @@ def main(argv=None):
         reports, cache = {}, {}
         for key, view in views.items():
             if id(view) not in cache:
-                cache[id(view)] = build_ghosts(
+                cache[id(view)] = build_ghost(
                     validate_motion(view, model, tolerances), model, options, fields
                 )
             reports[key] = cache[id(view)]
@@ -553,22 +554,22 @@ def main(argv=None):
             print(
                 f"Ghost result {report.status}; coverage {'complete' if report.complete else 'PARTIAL'}; window {report.window_frames / report.view.fps:g}s"
             )
-            for name, ghost in report.ghosts.items():
-                valid = np.isfinite(ghost.position_error)
-                if valid.any():
-                    print(
-                        f"  {name}: peak {np.nanmax(ghost.position_error) * 100:.3f}cm / {np.rad2deg(np.nanmax(ghost.angle_error)):.3f}deg"
-                    )
-                else:
-                    print(
-                        f"  {name}: UNVERIFIED (mapping, shared root, or insufficient history)"
-                    )
+            name, ghost = GHOST_NAME, report.ghost
+            valid = np.isfinite(ghost.position_error)
+            if valid.any():
+                print(
+                    f"  {name}: peak {np.nanmax(ghost.position_error) * 100:.3f}cm / {np.rad2deg(np.nanmax(ghost.angle_error)):.3f}deg"
+                )
+            else:
+                print(
+                    f"  {name}: UNVERIFIED (mapping, shared root, or insufficient history)"
+                )
             if report.unsupported_fields:
                 print(
                     f"  Unsupported NPZ fields: {', '.join(report.unsupported_fields)}"
                 )
         print(
-            "Velocity ghosts need a full window; shared root pose is not independent evidence.\nConverted-file checks do NOT certify original source fields. Overlap does NOT prove physical feasibility."
+            "The cyan skeleton needs a full window; rotation and joint errors may only appear in numeric checks.\nConverted-file checks do NOT certify original source fields. Overlap does NOT prove physical feasibility."
         )
         warn_motion_report(path, reports[args.view])
         if args.report:

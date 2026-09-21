@@ -98,6 +98,10 @@ uv run engineai-train --algo ppo --task engineai_t800_motion_tracking --sim mujo
 
 这些测试验证配置和 reset/step 契约；训练收敛及实机表现需独立评估。
 
+## T800 真机部署
+
+参见 [T800 真机部署与操作（官方 Native SDK）](README_T800_DEPLOY.md)：从连接机器人、下发程序、启动前清理进程，到手柄状态切换、dance 和结束清理；附状态图与常见问题。
+
 ## 仓库结构
 
 ```text

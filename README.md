@@ -100,6 +100,10 @@ uv run engineai-train --algo ppo --task engineai_t800_motion_tracking --sim mujo
 The tests cover config and reset/step contracts; training convergence and on-robot
 behavior need separate evaluation.
 
+## T800 real-robot deployment
+
+See the [T800 Native SDK deployment and operation guide (Chinese)](README_T800_DEPLOY.md) for connection, deployment, process cleanup, gamepad state transitions, dance, and troubleshooting.
+
 ## Repository Layout
 
 ```text

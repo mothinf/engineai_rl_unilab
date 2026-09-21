@@ -206,16 +206,20 @@ def test_converted_motion_runs_in_unchanged_training(isaac_npz, tmp_path, monkey
     ).build_task_env_cfg_override()
 
     def forbidden(*args, **kwargs):
-        pytest.fail("Training must not invoke offline conversion or tool FK")
+        pytest.fail("Training must not invoke offline conversion")
 
     monkeypatch.setattr(
         "engineai_rl_unilab.tasks.t800.convert_npz.convert_npz", forbidden
     )
-    monkeypatch.setattr(
-        "engineai_rl_unilab.tasks.t800.motion_npz.tracking_fk", forbidden
-    )
     env = registry.make(
         IDENTITY, num_envs=2, sim_backend="mujoco", env_cfg_override=override
+    )
+    # Startup validation may run nominal FK. It must never run again in reset/step.
+    monkeypatch.setattr(
+        "engineai_rl_unilab.tasks.t800_motion_tracking.preflight_motion", forbidden
+    )
+    monkeypatch.setattr(
+        "engineai_rl_unilab.tasks.t800.motion_validation.tracking_fk", forbidden
     )
     try:
         env.init_state()

@@ -19,15 +19,14 @@ from unilab.tasks.motion_tracking.common.motion_loader import MotionData
 
 from engineai_rl_unilab.tasks.t800.motion_npz import STATE_FIELDS
 from engineai_rl_unilab.tasks.t800.motion_ghosts import (
-    GHOST_NAMES,
-    build_ghosts,
+    build_ghost,
     quat_mul,
 )
 from engineai_rl_unilab.tasks.t800.motion_validation import load_views, validate_motion
 from engineai_rl_unilab.tasks.t800.replay import (
     ReplayState,
     contact_status,
-    draw_ghosts,
+    draw_ghost,
     ghost_texts,
 )
 
@@ -65,7 +64,7 @@ def render(
         option.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = contact_points
         option.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = contact_forces
         renderer.update_scene(state.data, camera=camera, scene_option=option)
-        draw_ghosts(renderer.scene, state, report, enabled, body)
+        draw_ghost(renderer.scene, state, report, enabled)
         renderer.render()
         viewport = mujoco.MjrRect(0, 0, width, height)
         for _, location, left, right in ghost_texts(
@@ -91,7 +90,7 @@ def render(
         return {
             "frame": frame,
             "scene_geoms": renderer.scene.ngeom,
-            "ghosts": sorted(enabled),
+            "ghost_visible": enabled,
             "contacts": state.data.ncon,
             "contact_points": contact_points,
             "contact_forces": contact_forces,
@@ -115,7 +114,7 @@ def main():
         _, views = load_views(path, model_path, names, "mujoco")
         with np.load(path, allow_pickle=False) as archive:
             fields = tuple(archive.files)
-        reports[name] = build_ghosts(
+        reports[name] = build_ghost(
             validate_motion(views["file"], model), model, present_fields=fields
         )
     for name, field in (
@@ -139,34 +138,24 @@ def main():
         else:
             i = view.joint_names.index("J05_ANKLE_ROLL_L")
             view.data.joint_vel[775:825, i] += 4
-        reports[name] = build_ghosts(
+        reports[name] = build_ghost(
             validate_motion(view, model),
             model,
             present_fields=reports["v2"].present_fields,
         )
     measurements = {}
     cases = [
-        ("old-all", "old", set(GHOST_NAMES), 1500, 1000),
-        ("v2-all", "v2", set(GHOST_NAMES), 1500, 1000),
-        ("old-body-velocity", "old", {"body-velocity"}, 1500, 1000),
-        ("v2-body-velocity", "v2", {"body-velocity"}, 1500, 1000),
-        ("orientation-error", "orientation-error", {"pose"}, 1500, 1000),
-        ("joint-speed-error", "joint-speed-error", {"joint-velocity"}, 1500, 1000),
-        ("old-small", "old", set(GHOST_NAMES), 1000, 700),
+        ("old-skeleton", "old", True, 1500, 1000),
+        ("v2-skeleton", "v2", True, 1500, 1000),
+        ("hidden", "v2", False, 1500, 1000),
+        ("orientation-error", "orientation-error", True, 1500, 1000),
+        ("joint-speed-error", "joint-speed-error", True, 1500, 1000),
+        ("old-small", "old", True, 1000, 700),
     ]
     for filename, key, enabled, width, height in cases:
         path = args.output_dir / f"{filename}.png"
         measurements[filename] = render(
             model, reports[key], path, enabled, width=width, height=height
-        )
-        print(path)
-    for key, layer in (
-        ("orientation-error", "pose"),
-        ("joint-speed-error", "joint-velocity"),
-    ):
-        path = args.output_dir / f"{key}-closeup.png"
-        measurements[f"{key}-closeup"] = render(
-            model, reports[key], path, {layer}, closeup=True
         )
         print(path)
     for key, report in reports.items():
@@ -184,7 +173,7 @@ def main():
             model,
             reports["v2"],
             path,
-            set(GHOST_NAMES),
+            True,
             frame=568,
             closeup=True,
             contact_points=points,

@@ -1,8 +1,13 @@
 """T800 motion tracking on UniLab's shared Manager-Based runtime."""
 
 from engineai_rl_unilab.assets import ensure_t800_assets
+from engineai_rl_unilab.tasks.t800.motion_preflight import preflight_motion
 from unilab.base import registry
-from unilab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg, make_manager_based_rl_env
+from unilab.envs import (
+    ManagerBasedRlEnv,
+    ManagerBasedRlEnvCfg,
+    make_manager_based_rl_env,
+)
 
 
 def make_engineai_t800_motion_env(
@@ -10,8 +15,9 @@ def make_engineai_t800_motion_env(
     num_envs: int = 1,
     backend_type: str = "mujoco",
 ) -> ManagerBasedRlEnv:
-    """Resolve robot assets once before materializing the shared runtime."""
+    """Reject invalid references before allocating environments or applying DR."""
     ensure_t800_assets()
+    cfg = preflight_motion(cfg)
     return make_manager_based_rl_env(cfg, num_envs=num_envs, backend_type=backend_type)
 
 

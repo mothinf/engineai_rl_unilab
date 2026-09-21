@@ -1,4 +1,4 @@
-"""Independent, time-aligned motion reconstructions; no physics or data repair."""
+"""One body-velocity reconstruction; orientation is checked but not drawn."""
 
 from __future__ import annotations
 
@@ -7,11 +7,11 @@ from functools import cached_property
 
 import numpy as np
 
-from .motion_npz import STATE_FIELDS, tracking_fk
+from .motion_npz import STATE_FIELDS
 from .motion_validation import ValidationReport
 
 
-GHOST_NAMES = ("pose", "body-velocity", "joint-velocity")
+GHOST_NAME = "body-velocity"
 KNOWN_FIELDS = frozenset((*STATE_FIELDS, "fps", "joint_names", "body_names"))
 
 
@@ -94,7 +94,6 @@ class GhostOptions:
 
 @dataclass
 class Ghost:
-    name: str
     position: np.ndarray
     quaternion: np.ndarray
     drawable: np.ndarray  # (T, bodies); false for unknown mapping/warm-up/world
@@ -113,7 +112,7 @@ class Ghost:
     def failed(self):
         return bool(self.hotspots.any())
 
-    def as_dict(self, names, root):
+    def as_dict(self, names):
         entities = {}
         for i, name in enumerate(names):
             if not name:
@@ -144,8 +143,6 @@ class Ghost:
                 if verified
                 else "UNVERIFIED"
             )
-            if i == root and self.name != "body-velocity":
-                status = "SHARED_ROOT_INPUT"
             entities[name] = {"status": status, **values}
         return {
             "entities": entities,
@@ -156,7 +153,7 @@ class Ghost:
 @dataclass
 class GhostReport:
     base: ValidationReport
-    ghosts: dict[str, Ghost]
+    ghost: Ghost
     options: GhostOptions
     window_frames: int
     root: int
@@ -170,7 +167,7 @@ class GhostReport:
 
     @property
     def failed(self):
-        return self.base.failed or any(g.failed for g in self.ghosts.values())
+        return self.base.failed or self.ghost.failed
 
     @property
     def complete(self):
@@ -188,8 +185,7 @@ class GhostReport:
     def anomaly_frames(self):
         mask = np.zeros(len(self.view.data.joint_pos), dtype=bool)
         mask[self.base.anomaly_frames] = True
-        for ghost in self.ghosts.values():
-            mask |= ghost.hotspots.any(axis=1)
+        mask |= self.ghost.hotspots.any(axis=1)
         return np.flatnonzero(mask)
 
     def worst(self):
@@ -206,15 +202,15 @@ class GhostReport:
             frame,
             body,
         )
-        for ghost in self.ghosts.values():
-            score = np.maximum(
-                np.nan_to_num(ghost.position_error / ghost.position_tol),
-                np.nan_to_num(ghost.angle_error / ghost.angle_tol),
-            )
-            f, b = np.unravel_index(np.argmax(score), score.shape)
-            candidate = (float(score[f, b]), int(f), int(b))
-            if candidate[0] > best[0]:
-                best = candidate
+        ghost = self.ghost
+        score = np.maximum(
+            np.nan_to_num(ghost.position_error / ghost.position_tol),
+            np.nan_to_num(ghost.angle_error / ghost.angle_tol),
+        )
+        f, b = np.unravel_index(np.argmax(score), score.shape)
+        candidate = (float(score[f, b]), int(f), int(b))
+        if candidate[0] > best[0]:
+            best = candidate
         return best[1], best[2] or self.root
 
     def as_dict(self):
@@ -229,10 +225,10 @@ class GhostReport:
                 "unsupported_fields": list(self.unsupported_fields),
                 "scope": "selected file only; converted-file checks do not certify original source fields",
                 "uses": {
-                    "joint_pos": "main FK; joint-velocity anchor",
-                    "joint_vel": "joint-velocity integration",
-                    "body_pos_w": "root pose; pose ghost; body-velocity anchor",
-                    "body_quat_w": "root pose; pose ghost; body-velocity anchor",
+                    "joint_pos": "main FK; numerical joint-velocity consistency",
+                    "joint_vel": "numerical derivative and FK velocity checks",
+                    "body_pos_w": "root pose; numerical FK check; body-velocity anchor",
+                    "body_quat_w": "root pose; numerical FK check; body-velocity anchor",
                     "body_lin_vel_w": "body-velocity translation",
                     "body_ang_vel_w": "body-velocity world rotation",
                     "fps": "playback and integration time",
@@ -240,21 +236,20 @@ class GhostReport:
                     "body_names": "body mapping, or explicitly selected source layout when absent",
                 },
             },
-            ghosts={
+            ghost={
+                "type": GHOST_NAME,
+                "rendering": "blue origin-to-origin skeleton; rotation errors are numerical only",
                 "requested_window_s": self.options.window,
                 "window_frames": self.window_frames,
                 "actual_window_s": self.window_frames / self.view.fps,
-                "warmup_policy": "full history required; velocity ghosts hidden before window_frames; never integrate across loops",
-                "layers": {
-                    name: ghost.as_dict(self.view.body_names, self.root)
-                    for name, ghost in self.ghosts.items()
-                },
+                "warmup_policy": "full history required; skeleton hidden before window_frames; never integrate across loops",
+                **self.ghost.as_dict(self.view.body_names),
             },
         )
         return result
 
 
-def build_ghosts(base, model, options=None, present_fields=()):
+def build_ghost(base, model, options=None, present_fields=()):
     options = options or GhostOptions()
     view, source = base.view, base.view.data
     n, bodies = source.body_pos_w.shape[:2]
@@ -263,69 +258,32 @@ def build_ghosts(base, model, options=None, present_fields=()):
         raise ValueError("Ghost window is too large for this frame rate")
     steps = max(1, int(np.floor(frame_window + 0.5)))
     root = model.body("LINK_BASE").id
-    ghost_data = {
-        "pose": (
-            source.body_pos_w.copy(),
-            source.body_quat_w.copy(),
-            view.pose_comparable,
-        ),
-        "body-velocity": (
-            integrate_linear(
-                source.body_pos_w, source.body_lin_vel_w, steps, 1 / view.fps
-            ),
-            integrate_world_orientation(
-                source.body_quat_w, source.body_ang_vel_w, steps, 1 / view.fps
-            ),
-            view.pose_comparable & view.linear_comparable,
-        ),
-    }
-    joint_pos = integrate_linear(
-        source.joint_pos, source.joint_vel, steps, 1 / view.fps
+    p = integrate_linear(source.body_pos_w, source.body_lin_vel_w, steps, 1 / view.fps)
+    q = integrate_world_orientation(
+        source.body_quat_w, source.body_ang_vel_w, steps, 1 / view.fps
     )
-    joint_p = np.full(source.body_pos_w.shape, np.nan)
-    joint_q = np.full(source.body_quat_w.shape, np.nan)
-    if steps < n:
-        fk_input = {
-            key: getattr(source, key)[steps:]
-            if key.startswith("joint_")
-            else getattr(source, key)[steps:, root : root + 1]
-            for key in STATE_FIELDS
-        }
-        fk_input["joint_pos"] = joint_pos[steps:]
-        joint_fk = tracking_fk(model, view.joint_names, fk_input)
-        joint_p[steps:], joint_q[steps:] = joint_fk.body_pos_w, joint_fk.body_quat_w
-    ghost_data["joint-velocity"] = (joint_p, joint_q, np.arange(bodies) != 0)
-    ghosts = {}
-    for name, (p, q, comparable) in ghost_data.items():
-        drawable = np.broadcast_to(comparable, (n, bodies)).copy()
-        if name != "pose":
-            drawable[:steps] = False
-        drawable[:, 0] = False
-        if not np.isfinite(p[drawable]).all() or not np.isfinite(q[drawable]).all():
-            raise ValueError(f"{name}: reconstruction produced non-finite states")
-        error_p = np.linalg.norm(p - base.fk.body_pos_w, axis=-1)
-        error_q = orientation_error(q, base.fk.body_quat_w)
-        error_p[~drawable] = np.nan
-        error_q[~drawable] = np.nan
-        if name != "body-velocity":
-            error_p[:, root] = error_q[:, root] = np.nan
-        ghosts[name] = Ghost(
-            name,
-            p,
-            q,
-            drawable,
-            error_p,
-            error_q,
-            base.metrics["body_position_fk"].tolerance
-            if name == "pose"
-            else options.position_tol,
-            base.metrics["body_orientation_fk"].tolerance
-            if name == "pose"
-            else np.deg2rad(options.angle_tol_deg),
-        )
+    comparable = view.pose_comparable & view.linear_comparable
+    drawable = np.broadcast_to(comparable, (n, bodies)).copy()
+    drawable[:steps] = False
+    drawable[:, 0] = False
+    if not np.isfinite(p[drawable]).all() or not np.isfinite(q[drawable]).all():
+        raise ValueError("Body-velocity reconstruction produced non-finite states")
+    error_p = np.linalg.norm(p - base.fk.body_pos_w, axis=-1)
+    error_q = orientation_error(q, base.fk.body_quat_w)
+    error_p[~drawable] = np.nan
+    error_q[~drawable] = np.nan
+    ghost = Ghost(
+        p,
+        q,
+        drawable,
+        error_p,
+        error_q,
+        options.position_tol,
+        np.deg2rad(options.angle_tol_deg),
+    )
     return GhostReport(
         base,
-        ghosts,
+        ghost,
         options,
         steps,
         root,

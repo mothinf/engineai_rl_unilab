@@ -15,7 +15,7 @@ TASK = "engineai_t800_motion_tracking"
 IDENTITY = "EngineAIT800MotionTracking"
 
 
-def owner():
+def owner(profile="wostate_dr", sim="mujoco"):
     with initialize_config_dir(
         config_dir=str(package_root() / "conf/ppo"), version_base="1.3"
     ):
@@ -23,7 +23,7 @@ def owner():
             "config",
             overrides=[
                 f"hydra.searchpath=[file://{CONF_ROOT / 'ppo'}]",
-                f"task={TASK}/mujoco",
+                f"task={TASK}/{sim}{'_' + profile if profile else ''}",
             ],
         )
 

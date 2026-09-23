@@ -25,7 +25,7 @@ registry.register_env_config("EngineAIT800MotionTracking", ManagerBasedRlEnvCfg)
 registry.register_env(
     "EngineAIT800MotionTracking", make_engineai_t800_motion_env, sim_backend="mujoco"
 )
-# Keep the integration seam; a Motrix owner and its validation are separate work.
+# No-DR Motrix demo owners reuse the same policy/environment contract.
 registry.register_env(
     "EngineAIT800MotionTracking", make_engineai_t800_motion_env, sim_backend="motrix"
 )

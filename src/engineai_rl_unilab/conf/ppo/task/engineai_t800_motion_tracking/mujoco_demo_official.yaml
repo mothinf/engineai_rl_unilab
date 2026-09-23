@@ -1,0 +1,57 @@
+# @package _global_
+# Paired with t800_long_adaptive_1024/model_29999.pt.
+# Retain its 500 Hz physics and random TRAINING initialization.
+defaults:
+  - /task/engineai_t800_motion_tracking/mujoco
+  - _self_
+
+algo:
+  max_iterations: 30000
+
+env:
+  sim_dt: 0.002
+  commands:
+    motion:
+      params:
+        motion_file: assets/motions/t800/dance_t800.npz
+
+training:
+  play_env_num: 1
+  cam_distance: 3.5
+  cam_elevation: -15.0
+  cam_azimuth: 135.0
+  cam_tracking: true
+  cam_tracking_env_idx: 0
+  cam_tracking_extra_envs: 0
+
+# Keep the training contract above intact. Presentation-only reset changes
+# belong in play_profile; the shared adapter replaces these whole mappings.
+play_profile:
+  enabled: true
+  env:
+    max_episode_seconds: 30.0
+    commands:
+      motion:
+        _target_: ${env.commands.motion._target_}
+        entity_name: robot
+        resampling_time_range: [1.0e9, 1.0e9]
+        params:
+          motion_file: ${env.commands.motion.params.motion_file}
+          anchor_body_name: LINK_BASE
+          body_names: ${env.commands.motion.params.body_names}
+          sampling_mode: start
+          sampling_start_ratio: 0.0
+          truncate_on_clip_end: true
+          pose_range: {x: [0, 0], y: [0, 0], z: [0, 0], roll: [0, 0], pitch: [0, 0], yaw: [0, 0]}
+          velocity_range: {x: [0, 0], y: [0, 0], z: [0, 0], roll: [0, 0], pitch: [0, 0], yaw: [0, 0]}
+          joint_position_range: [0.0, 0.0]
+          joint_default_position_range: [0.0, 0.0]
+    terminations:
+      time_out: ${env.terminations.time_out}
+      anchor_pos: ${env.terminations.anchor_pos}
+      anchor_ori: ${env.terminations.anchor_ori}
+      ee_body_pos: ${env.terminations.ee_body_pos}
+      motion_clip_end:
+        func: unilab.tasks.motion_tracking.common.manager_terms.motion_clip_end
+        time_out: true
+        params: {command_name: motion}

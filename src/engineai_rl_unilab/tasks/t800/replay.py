@@ -100,18 +100,33 @@ def warn_motion_report(path, report):
     def warn(message):
         print(f"[WARNING] {message}", file=sys.stderr, flush=True)
 
-    if report.failed:
+    if report.failed or report.warnings:
         frame, body = report.worst()
-        warn(f"NPZ data consistency check FAILED: {path}")
+        if report.failed:
+            warn(f"NPZ model contract check FAILED: {path}")
+        if report.warnings:
+            warn(f"NPZ temporal consistency diagnostic thresholds exceeded: {path}")
+            warn(
+                "Sampling/integration diagnostics are warnings, not proof of invalid data."
+            )
         warn(
             f"{len(report.anomaly_frames)} anomalous frames; worst frame={frame} "
             f"({frame / report.view.fps:.3f}s), body={report.view.body_names[body]}"
         )
         failed_metrics = [
-            key for key, metric in report.base.metrics.items() if metric.failed.any()
+            key
+            for key, metric in report.base.metrics.items()
+            if not metric.temporal and metric.failed.any()
         ]
         if failed_metrics:
             warn("Failed numerical checks: " + ", ".join(failed_metrics))
+        temporal_metrics = [
+            key
+            for key, metric in report.base.metrics.items()
+            if metric.temporal and metric.failed.any()
+        ]
+        if temporal_metrics:
+            warn("Temporal diagnostic warnings: " + ", ".join(temporal_metrics))
         name, ghost = GHOST_NAME, report.ghost
         for label, error, limit, scale, unit in (
             ("position", ghost.position_error, ghost.position_tol, 100, "cm"),
@@ -339,7 +354,7 @@ def run_viewer(model, reports, args):
         args.start_frame
         if args.start_frame is not None
         else worst_frame
-        if report.failed
+        if report.failed or report.warnings
         else 0
     )
     state.set_frame(start)
@@ -348,7 +363,7 @@ def run_viewer(model, reports, args):
     error_logger = None if args.no_error_log else GhostErrorLogger(report)
     events = deque()
     print(
-        "Opening ghost viewer (paused by default); failing clips start at their worst frame."
+        "Opening ghost viewer (paused by default); clips with errors/warnings start at their worst frame."
     )
     print(KEY_HELP)
     if error_logger is not None:
@@ -474,7 +489,11 @@ def main(argv=None):
         default=5,
         help="Velocity ghost angle threshold, degrees",
     )
-    parser.add_argument("--check-only", action="store_true")
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Check without replay: exit 1 for model contract failures, 2 for load errors; temporal warnings exit 0",
+    )
     parser.add_argument(
         "--headless",
         action="store_true",

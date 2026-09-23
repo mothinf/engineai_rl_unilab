@@ -47,14 +47,14 @@ def modified(view, frames=None):
     return replace(view, data=data)
 
 
-def test_old_fails_v2_passes_with_identical_pose(names, fixed):
+def test_old_warns_v2_passes_with_identical_pose(names, fixed):
     model, good = fixed
     _, views = load_views(OLD, MODEL, names, "mujoco")
     bad = views["file"]
     for key in ("joint_pos", "joint_vel", "body_pos_w", "body_quat_w"):
         np.testing.assert_array_equal(getattr(bad.data, key), getattr(good.data, key))
     old_report, fixed_report = validate_motion(bad, model), validate_motion(good, model)
-    assert old_report.status == "FAIL"
+    assert old_report.status == "WARN" and not old_report.failed
     assert fixed_report.status == "PASS"
     for name in ("LINK_ANKLE_ROLL_L", "LINK_ANKLE_ROLL_R"):
         i = good.body_names.index(name)
@@ -169,6 +169,6 @@ def test_sustained_moderate_error_is_navigable(fixed):
     report.metrics["body_linear_fd"] = Metric(
         metric.name, metric.names, metric.units, error, metric.tolerance, True
     )
-    assert report.failed
+    assert report.warnings and not report.failed
     assert 1 in report.anomaly_frames
     assert report.worst()[0] == "body_linear_fd"

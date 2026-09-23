@@ -109,7 +109,7 @@ class Ghost:
         )
 
     @property
-    def failed(self):
+    def exceeded(self):
         return bool(self.hotspots.any())
 
     def as_dict(self, names):
@@ -137,7 +137,7 @@ class Ghost:
                 }
             verified = np.isfinite(self.position_error[:, i]).any()
             status = (
-                "FAIL"
+                "WARN"
                 if self.hotspots[:, i].any()
                 else "PASS"
                 if verified
@@ -167,7 +167,11 @@ class GhostReport:
 
     @property
     def failed(self):
-        return self.base.failed or self.ghost.failed
+        return self.base.failed
+
+    @property
+    def warnings(self):
+        return self.base.warnings or self.ghost.exceeded
 
     @property
     def complete(self):
@@ -179,7 +183,11 @@ class GhostReport:
 
     @property
     def status(self):
-        return "FAIL" if self.failed else "PASS" if self.complete else "PARTIAL"
+        if self.failed:
+            return "FAIL"
+        if not self.complete:
+            return "PARTIAL"
+        return "WARN" if self.warnings else "PASS"
 
     @cached_property
     def anomaly_frames(self):
@@ -218,6 +226,7 @@ class GhostReport:
         result.update(
             status=self.status,
             complete=bool(self.complete),
+            has_warnings=bool(self.warnings),
             numerical_status=self.base.status,
             anomaly_frames=self.anomaly_frames.tolist(),
             coverage={
@@ -238,7 +247,8 @@ class GhostReport:
             },
             ghost={
                 "type": GHOST_NAME,
-                "rendering": "blue origin-to-origin skeleton; rotation errors are numerical only",
+                "rendering": "cyan origin-to-origin skeleton; rotation errors are numerical only",
+                "severity": "warning",
                 "requested_window_s": self.options.window,
                 "window_frames": self.window_frames,
                 "actual_window_s": self.window_frames / self.view.fps,

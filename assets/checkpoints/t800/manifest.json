@@ -1,0 +1,28 @@
+{
+  "description": "Local T800 demo bundles. model.pt has CPU tensor storage for portable loading; all checkpoint values are preserved. run_config.json is an unchanged copy of the original training record. No remote download is configured.",
+  "sources": {
+    "dance18s": {
+      "run": "t800_official_xml_nodr_1024_18s_150hz_v2_15000",
+      "checkpoint": "model_14999.pt",
+      "original_sha256": "8fc01ac8bd509fce86eb2f747766fb57d9dfc1d424f7f16e8b6665da315ab8ad",
+      "motion": "dance1_subject2_t800_first18s_mujoco_v2.npz",
+      "physics_hz": 150
+    },
+    "dance-official": {
+      "run": "t800_long_adaptive_1024",
+      "checkpoint": "model_29999.pt",
+      "original_sha256": "5adfb7ac363569699a3dfa53139d8199fdd6febad9768115afe7b916054847fb",
+      "motion": "dance_t800.npz",
+      "physics_hz": 500,
+      "note": "Original motion retained. Temporal consistency warnings are expected; no reference data was repaired."
+    }
+  },
+  "sha256": {
+    "assets/checkpoints/t800/dance18s/model.pt": "44347730b1e4c02e7ab1d71c2a13a4bc079e8fdea39d7446bd5e8fd9bb94bff4",
+    "assets/checkpoints/t800/dance18s/run_config.json": "0a239f514ea0af2d107ba509fb9949dd3a587c3108f4261e66fa12dbda5bc402",
+    "assets/checkpoints/t800/dance-official/model.pt": "abf2aefdf48c3795fcb9ea188e14e09f8a7e73091152ee96ca2204d20aafac1a",
+    "assets/checkpoints/t800/dance-official/run_config.json": "a79af753ee63d7aade8b7bb76f810ed25bda6575ef16e294402955068004daee",
+    "assets/motions/t800/dance_t800.npz": "593d54f51386982fbee175bbdcef51e58fa754fbc18c04552868ad5b9d285ea7",
+    "assets/motions/t800/dance1_subject2_t800_first18s_mujoco_v2.npz": "ea64477cb1943f6e2f60795dc79fa331a4b672e40c7b0b84ef4137412214f38f"
+  }
+}

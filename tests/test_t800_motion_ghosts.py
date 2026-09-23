@@ -53,7 +53,8 @@ def test_old_v2_spatial_acceptance(loaded):
     model, names, view, good = loaded
     _, old_views = load_views(OLD, MODEL, names, "mujoco")
     bad = build_ghost(validate_motion(old_views["file"], model), model)
-    assert good.status == "PASS" and bad.status == "FAIL"
+    assert good.status == "PASS" and bad.status == "WARN"
+    assert not bad.failed and bad.warnings
     np.testing.assert_array_equal(good.base.fk.body_pos_w, bad.base.fk.body_pos_w)
     np.testing.assert_array_equal(good.base.fk.body_quat_w, bad.base.fk.body_quat_w)
     ankle = view.body_names.index("LINK_ANKLE_ROLL_L")
@@ -216,7 +217,7 @@ def test_coverage_options_and_window_rounding(loaded):
     # Changing only fps changes integration time, not a hidden simulator dt.
     slow = replace(view, fps=25)
     changed = build_ghost(validate_motion(slow, model), model)
-    assert changed.window_frames == 5 and changed.failed
+    assert changed.window_frames == 5 and changed.warnings and not changed.failed
     for key in ("window", "position_tol", "angle_tol_deg"):
         for value in (0, -1, np.nan, np.inf):
             with pytest.raises(ValueError):

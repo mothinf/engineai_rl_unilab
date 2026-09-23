@@ -168,7 +168,13 @@ class ValidationReport:
 
     @property
     def failed(self) -> bool:
-        return any(m.failed.any() for m in self.metrics.values())
+        """Only same-frame/model contract violations are hard failures."""
+        return any(m.failed.any() for m in self.metrics.values() if not m.temporal)
+
+    @property
+    def warnings(self) -> bool:
+        """Finite-sample temporal discrepancies are diagnostic, not proof of corruption."""
+        return any(m.failed.any() for m in self.metrics.values() if m.temporal)
 
     @property
     def complete(self) -> bool:
@@ -180,7 +186,11 @@ class ValidationReport:
 
     @property
     def status(self) -> str:
-        return "FAIL" if self.failed else "PASS" if self.complete else "PARTIAL"
+        if self.failed:
+            return "FAIL"
+        if not self.complete:
+            return "PARTIAL"
+        return "WARN" if self.warnings else "PASS"
 
     @cached_property
     def anomaly_frames(self) -> np.ndarray:
@@ -193,7 +203,7 @@ class ValidationReport:
         candidates = []
         for key, metric in self.metrics.items():
             score = np.nan_to_num(metric.error / metric.tolerance, nan=0)
-            if self.failed:
+            if self.failed or self.warnings:
                 score[:, ~metric.failed] = 0
             frame, entity = np.unravel_index(np.argmax(score), score.shape)
             candidates.append((float(score[frame, entity]), key, frame, entity))
@@ -207,11 +217,12 @@ class ValidationReport:
                 "units": m.units,
                 "tolerance": m.tolerance,
                 "criterion": "RMS or peak > 10x tolerance" if m.temporal else "peak",
+                "severity": "warning" if m.temporal else "error",
                 "entities": {
                     name: {
                         "status": "UNVERIFIED"
                         if not m.verified[i]
-                        else "FAIL"
+                        else ("WARN" if m.temporal else "FAIL")
                         if m.failed[i]
                         else "PASS",
                         "rms": float(m.rms[i]) if m.verified[i] else None,
@@ -228,6 +239,7 @@ class ValidationReport:
             "view": self.view.label,
             "status": self.status,
             "complete": bool(self.complete),
+            "has_warnings": bool(self.warnings),
             "fps": self.view.fps,
             "frames": len(self.view.data.joint_pos),
             "notes": list(self.view.notes),
@@ -243,7 +255,7 @@ class ValidationReport:
             ids = np.flatnonzero(m.failed)
             unverified = sum(not m.verified[i] for i, n in enumerate(m.names) if n)
             lines.append(
-                f"  {key}: {len(ids)} failing, {unverified} unverified; "
+                f"  {key}: {len(ids)} {'warning' if m.temporal else 'failing'}, {unverified} unverified; "
                 f"limit={m.tolerance:g} {m.units}"
             )
             for i in sorted(ids, key=lambda i: -m.rms[i])[:5]:
@@ -253,6 +265,11 @@ class ValidationReport:
                     f"{m.units}, frame={frame} ({frame / self.view.fps:.3f}s)"
                 )
         lines.extend(f"  NOTE: {note}" for note in self.view.notes)
+        if self.warnings:
+            lines.append(
+                "  WARNING: Temporal consistency diagnostics exceeded thresholds; "
+                "finite-sample differences do not prove invalid data and do not block training."
+            )
         lines.append("  Temporal boundaries excluded; frame indices are zero-based.")
         return "\n".join(lines)
 

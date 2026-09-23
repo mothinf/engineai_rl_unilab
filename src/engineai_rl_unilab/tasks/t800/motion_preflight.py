@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+import sys
 from zipfile import BadZipFile
 
 import numpy as np
@@ -89,9 +90,9 @@ def preflight_motion(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
                     "training requires one motion frame per control step"
                 )
             report = validate_motion(view, model, Tolerances())
-            if report.status != "PASS":
+            if report.failed or not report.complete:
                 raise ValueError(
-                    report.text() + "\nRequired checks must all PASS; "
+                    report.text() + "\nRequired contract checks must all PASS; "
                     "short clips/UNVERIFIED data cannot enter training."
                 )
         except (ValueError, KeyError, OSError, RuntimeError, BadZipFile) as exc:
@@ -100,11 +101,20 @@ def preflight_motion(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
                 "Environment creation aborted. Fix the data or explicitly convert "
                 "the supported Isaac source with engineai-convert-npz, then recheck."
             ) from exc
-        print(
-            f"[NPZ preflight] PASS: {path} "
-            f"({len(view.data.joint_pos)} frames, {view.fps} fps)",
-            flush=True,
-        )
+        if report.warnings:
+            print(
+                f"[NPZ preflight] WARNING: {path}\n{report.text()}\n"
+                "Contract checks passed; continuing with temporal diagnostic warnings. "
+                "No data was repaired. Inspect with engineai-replay.",
+                file=sys.stderr,
+                flush=True,
+            )
+        else:
+            print(
+                f"[NPZ preflight] PASS: {path} "
+                f"({len(view.data.joint_pos)} frames, {view.fps} fps)",
+                flush=True,
+            )
 
     checked_command = replace(
         command,

@@ -79,21 +79,24 @@ def test_valid_file_passes_without_changing_config_or_npz(capsys):
     assert "[NPZ preflight] PASS" in capsys.readouterr().out
 
 
-def test_old_file_blocks_registered_factory_before_allocation(monkeypatch):
+def test_temporal_warnings_allow_registered_factory(monkeypatch, capsys):
+    from unilab.base.registry import ABEnv
+
     _, override = config(OLD)
-    factory = Mock(side_effect=AssertionError("Must not allocate an environment"))
+    factory = Mock(return_value=Mock(spec=ABEnv))
     monkeypatch.setattr(
         "engineai_rl_unilab.tasks.t800_motion_tracking.make_manager_based_rl_env",
         factory,
     )
-    with pytest.raises(MotionValidationError) as error:
-        registry.make(
-            IDENTITY, sim_backend="mujoco", num_envs=1024, env_cfg_override=override
-        )
-    message = str(error.value)
+    result = registry.make(
+        IDENTITY, sim_backend="mujoco", num_envs=1, env_cfg_override=override
+    )
+    assert result is factory.return_value
+    message = capsys.readouterr().err
     for fragment in (str(OLD), "body_linear_fd", "LINK_ANKLE", "frame=", "limit="):
         assert fragment in message
-    factory.assert_not_called()
+    assert "WARNING" in message and "continuing" in message
+    factory.assert_called_once()
 
 
 @pytest.mark.parametrize(
@@ -148,8 +151,11 @@ def test_every_clip_is_checked_and_not_concatenated(tmp_path):
     cfg, _ = config([V2, path])
     checked = preflight_motion(cfg)
     assert checked.commands["motion"].motion_file == [str(V2), str(path)]
-    bad, _ = config([V2, OLD])
-    with pytest.raises(MotionValidationError, match=OLD.name):
+    warning, _ = config([V2, OLD])
+    assert len(preflight_motion(warning).commands["motion"].motion_file) == 2
+    bad_path = write_variant(tmp_path, "body_pos_w")
+    bad, _ = config([V2, bad_path])
+    with pytest.raises(MotionValidationError, match=bad_path.name):
         preflight_motion(bad)
 
 
@@ -165,12 +171,15 @@ def test_resolved_paths_are_the_paths_passed_to_training(monkeypatch):
     assert cfg.commands["motion"].motion_file != str(V2)
 
 
-def test_no_stale_pass_cache(tmp_path):
+def test_no_stale_pass_cache(tmp_path, capsys):
     path = tmp_path / "replaceable.npz"
     path.write_bytes(V2.read_bytes())
     cfg, _ = config(path)
     preflight_motion(cfg)
     path.write_bytes(OLD.read_bytes())
+    preflight_motion(cfg)
+    assert "WARNING" in capsys.readouterr().err
+    path.write_bytes(write_variant(tmp_path, "body_pos_w").read_bytes())
     with pytest.raises(MotionValidationError):
         preflight_motion(cfg)
 
@@ -202,4 +211,49 @@ def test_empty_motion_list_is_not_a_pass():
     cfg, _ = config()
     cfg.commands["motion"].params.motion_file = []
     with pytest.raises(MotionValidationError, match="nonempty"):
+        preflight_motion(cfg)
+
+
+def test_analytic_fast_motion_warns_without_blocking_or_repair(tmp_path, capsys):
+    """Exact sinusoidal joint velocity need not equal its 50 Hz central difference."""
+    import mujoco
+    from engineai_rl_unilab.tasks.t800.motion_npz import STATE_FIELDS, tracking_fk
+
+    model = mujoco.MjModel.from_xml_path(
+        str(ROOT / "assets/robots/t800/scene_flat.xml")
+    )
+    with np.load(V2) as archive:
+        values = {key: archive[key].copy() for key in archive.files}
+    n = 100
+    source = {
+        key: np.repeat(
+            values[key][:1] if key.startswith("joint_") else values[key][:1, 1:2],
+            n,
+            axis=0,
+        )
+        for key in STATE_FIELDS
+    }
+    for key in ("joint_vel", "body_lin_vel_w", "body_ang_vel_w"):
+        source[key][:] = 0
+    joint = 16
+    phase = 2 * np.pi * 6 * np.arange(n) / 50
+    limits = model.joint(str(values["joint_names"][joint])).range
+    source["joint_pos"][:, joint] = limits.mean() + 0.1 * np.sin(phase)
+    source["joint_vel"][:, joint] = 0.1 * 2 * np.pi * 6 * np.cos(phase)
+    fk = tracking_fk(model, tuple(values["joint_names"]), source)
+    values.update({key: getattr(fk, key) for key in STATE_FIELDS})
+    path = tmp_path / "analytic.npz"
+    np.savez(path, **values)
+    cfg, _ = config(path)
+    digest = hashlib.sha256(path.read_bytes()).digest()
+    preflight_motion(cfg)
+    warning = capsys.readouterr().err
+    assert "joint_velocity_fd" in warning and "continuing" in warning
+    assert "FAIL" not in warning
+    assert hashlib.sha256(path.read_bytes()).digest() == digest
+
+    # A genuine same-frame contract error must still block, even with warnings.
+    values["body_lin_vel_w"][:, 7, 0] += 1
+    np.savez(path, **values)
+    with pytest.raises(MotionValidationError, match="body_linear_fk"):
         preflight_motion(cfg)

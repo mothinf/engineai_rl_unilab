@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - /task/engineai_t800_motion_tracking/mujoco_demo_official
+  - _self_
+
+training:
+  sim_backend: motrix
+  play_env_num: 16
+  render_spacing: 2.0
+  # Native interactive playback uses Motrix's default camera. training.cam_*
+  # settings are currently forwarded only on the recording path in unisim.
+  play_render_mode: interactive
+  play_steps: null

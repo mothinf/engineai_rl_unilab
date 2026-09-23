@@ -1,0 +1,20 @@
+# @package _global_
+# Same policy contract and reset profile; use G1 demo's native Motrix renderer.
+defaults:
+  - /task/engineai_t800_motion_tracking/mujoco_demo18s
+  - _self_
+
+training:
+  sim_backend: motrix
+  play_env_num: 16
+  render_spacing: 2.0
+  # Native interactive playback uses Motrix's default camera. training.cam_*
+  # settings are currently forwarded only on the recording path in unisim.
+  play_render_mode: interactive
+  play_steps: null
+
+env:
+  # Motrix's default 3 iterations terminated this MuJoCo-trained policy at
+  # step 537. Ten iterations complete two full clips without changing the
+  # 150 Hz physics / 50 Hz control, PD, policy I/O or termination thresholds.
+  motrix_max_iterations: 10

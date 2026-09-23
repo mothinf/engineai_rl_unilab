@@ -28,7 +28,7 @@ SCRIPT_NAMES = {
     "td3": "train_td3.py",
     "flashsac": "train_flashsac.py",
 }
-SUPPORTED_SIMS = ("mujoco", "mjwarp")
+SUPPORTED_SIMS = ("mujoco", "mjwarp", "motrix")
 
 # Per-algo config trees, mirroring UniLab's own conf/<algo>/ layout; the CLI
 # appends conf/<algo> to the UniLab config search path via Hydra --config-dir.
@@ -50,6 +50,11 @@ def _build_command(mode: str, argv: Sequence[str] | None) -> list[str]:
     parser.add_argument("--algo", required=True, choices=sorted(SCRIPT_NAMES))
     parser.add_argument("--task", required=True)
     parser.add_argument("--sim", required=True, choices=SUPPORTED_SIMS)
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help="Select <sim>_<profile>.yaml without changing the physics backend",
+    )
     if mode == "eval":
         parser.add_argument("--load-run", default=None)
     args, overrides = parser.parse_known_args(argv)
@@ -58,14 +63,17 @@ def _build_command(mode: str, argv: Sequence[str] | None) -> list[str]:
     if not script.is_file():
         raise SystemExit(f"UniLab entrypoint script not found: {script}")
     conf_dir = CONF_ROOT / args.algo
-    owner_yaml = conf_dir / "task" / args.task / f"{args.sim}.yaml"
+    if args.profile is not None and not args.profile.isidentifier():
+        parser.error("--profile must be a simple identifier")
+    owner = args.sim if args.profile is None else f"{args.sim}_{args.profile}"
+    owner_yaml = conf_dir / "task" / args.task / f"{owner}.yaml"
     if not owner_yaml.is_file():
         raise SystemExit(
             f"No owner config exists for algo={args.algo}, task={args.task}, "
             f"sim={args.sim}: {owner_yaml}"
         )
 
-    generated = [f"task={args.task}/{args.sim}"]
+    generated = [f"task={args.task}/{owner}"]
     if mode == "eval":
         generated.append("training.play_only=true")
         if args.load_run is not None:

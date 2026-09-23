@@ -142,15 +142,20 @@ def test_pure_rotation_errors_are_reported_without_axes(loaded):
 def test_cli_reports_defaults_removed_options_and_coverage(tmp_path, capsys):
     output = tmp_path / "report.json"
     args = ["--format", "mujoco", "--check-only", "--report", str(output)]
-    assert main([*args, "--npz-file", str(OLD)]) == 1
+    assert main([*args, "--npz-file", str(OLD)]) == 0
     warnings = capsys.readouterr().err
-    assert "[WARNING] NPZ data consistency check FAILED" in warnings
+    assert (
+        "[WARNING] NPZ temporal consistency diagnostic thresholds exceeded" in warnings
+    )
+    assert "FAILED" not in warnings
     assert "body_linear_fd" in warnings and "body-velocity position" in warnings
     assert "frame=" in warnings and "body=LINK_" in warnings
     payload = json.loads(output.read_text())["file"]
     assert "ghosts" not in payload
     assert payload["ghost"]["type"] == "body-velocity"
-    assert payload["ghost"]["entities"]["LINK_ANKLE_ROLL_L"]["status"] == "FAIL"
+    assert payload["status"] == "WARN" and payload["has_warnings"]
+    assert payload["metrics"]["body_linear_fd"]["severity"] == "warning"
+    assert payload["ghost"]["entities"]["LINK_ANKLE_ROLL_L"]["status"] == "WARN"
     assert main([*args, "--npz-file", str(V2)]) == 0
     assert "[WARNING]" not in capsys.readouterr().err
     assert json.loads(output.read_text())["file"]["status"] == "PASS"
@@ -329,8 +334,11 @@ def test_disable_error_log_keeps_skeleton_and_validation(loaded, monkeypatch, ca
     )
     assert "[NPZ drift]" not in capsys.readouterr().out
     assert all(snapshot[1] > 0 for snapshot in snapshots)
-    assert main(["--npz-file", str(OLD), "--check-only", "--no-error-log"]) == 1
-    assert "[WARNING] NPZ data consistency check FAILED" in capsys.readouterr().err
+    assert main(["--npz-file", str(OLD), "--check-only", "--no-error-log"]) == 0
+    assert (
+        "[WARNING] NPZ temporal consistency diagnostic thresholds exceeded"
+        in capsys.readouterr().err
+    )
 
 
 def test_error_logger_retains_spikes_and_flushes_once_when_paused(loaded):
@@ -531,30 +539,50 @@ def test_native_contact_geometry_coexists_with_ghosts(loaded):
     assert "No contacts at this frame" in contact_status(state, opt)
 
 
-def test_ghost_only_failures_also_warn(loaded, capsys):
+def test_ghost_only_exceedances_warn_without_failure(loaded, capsys):
     from engineai_rl_unilab.tasks.t800.motion_ghosts import GhostOptions
 
     model, reports = loaded
     report = build_ghost(reports["v2"].base, model, GhostOptions(position_tol=0.0001))
-    assert not report.base.failed and report.failed
+    assert not report.failed and report.warnings and report.status == "WARN"
     warn_motion_report(V2, report)
     warnings = capsys.readouterr().err
-    assert "FAILED" in warnings and "body-velocity position" in warnings
+    assert "thresholds exceeded" in warnings and "body-velocity position" in warnings
+    assert "FAILED" not in warnings
     assert "Failed numerical checks" not in warnings
+
+
+def test_contract_failure_still_has_nonzero_exit_with_warnings(tmp_path, capsys):
+    with np.load(OLD) as archive:
+        values = {key: archive[key].copy() for key in archive.files}
+    values["body_pos_w"][100:120, 7, 0] += 0.1
+    path = tmp_path / "contract_error.npz"
+    np.savez(path, **values)
+    report = tmp_path / "report.json"
+    assert main(["--npz-file", str(path), "--check-only", "--report", str(report)]) == 1
+    warning = capsys.readouterr().err
+    assert "model contract check FAILED" in warning
+    assert "Temporal diagnostic warnings" in warning
+    payload = json.loads(report.read_text())["file"]
+    assert payload["status"] == "FAIL" and payload["has_warnings"]
+    assert payload["metrics"]["body_position_fk"]["severity"] == "error"
 
 
 def test_viewer_receives_warning_before_launch(monkeypatch, capsys):
     def viewer(*args):
-        assert "[WARNING] NPZ data consistency check FAILED" in capsys.readouterr().err
+        assert (
+            "[WARNING] NPZ temporal consistency diagnostic thresholds exceeded"
+            in capsys.readouterr().err
+        )
 
     monkeypatch.setattr("engineai_rl_unilab.tasks.t800.replay.run_viewer", viewer)
-    assert main(["--npz-file", str(OLD), "--play"]) == 1
+    assert main(["--npz-file", str(OLD), "--play"]) == 0
 
 
 def test_hidden_skeleton_keeps_validation_and_can_be_enabled(
     loaded, monkeypatch, capsys
 ):
-    assert main(["--npz-file", str(OLD), "--no-ghost", "--check-only"]) == 1
+    assert main(["--npz-file", str(OLD), "--no-ghost", "--check-only"]) == 0
     assert "[WARNING]" in capsys.readouterr().err
     model, reports = loaded
     snapshots = run_keys(

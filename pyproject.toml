@@ -13,7 +13,7 @@ requires-python = ">=3.10,<3.14"
 dependencies = [
     # UniLab and unilab-rl are formally released on PyPI; every dependency
     # resolves from the default index except torch (cu128 index below).
-    "unilab[mujoco]==1.1.0",
+    "unilab[mujoco,motrix]==1.1.0",
     "unilab-rl==1.0.0",
     "unisim-core>=1.1.3,<1.1.5",
     # Re-declared as a direct dependency so the cu128 index source below
@@ -27,6 +27,7 @@ dependencies = [
 [project.scripts]
 engineai-train = "engineai_rl_unilab.cli:train_main"
 engineai-eval = "engineai_rl_unilab.cli:eval_main"
+demo = "engineai_rl_unilab.demo:main"
 engineai-convert-npz = "engineai_rl_unilab.tasks.t800.convert_npz:main"
 engineai-replay = "engineai_rl_unilab.tasks.t800.replay:main"
 

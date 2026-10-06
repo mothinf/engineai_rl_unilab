@@ -8,13 +8,17 @@ from numbers import Real
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-
 from unilab.envs.mdp import JointPositionAction, JointPositionActionCfg
+from unilab.managers import CommandTerm
 from unilab.managers.manager_base import ManagerTermBaseCfg
 from unilab.tasks.locomotion.common.manager_terms import SensorTermBase
 from unilab.tasks.locomotion.g1.manager_terms import feet_phase as _G1FeetPhase
 from unilab.tasks.locomotion.g1.manager_terms import (
     feet_phase_contact as _G1FeetPhaseContact,
+)
+from unilab.tasks.motion_tracking.common.manager_terms import (
+    MotionCommand,
+    MotionCommandCfg,
 )
 from unilab.utils.rotation import np_quat_apply_inverse, np_yaw_quat
 
@@ -68,7 +72,11 @@ def compute_motion_command_gate(
     command: np.ndarray,
     command_threshold: float = 0.1,
 ) -> np.ndarray:
-    if not isinstance(command, np.ndarray) or command.ndim != 2 or command.shape[1] != 3:
+    if (
+        not isinstance(command, np.ndarray)
+        or command.ndim != 2
+        or command.shape[1] != 3
+    ):
         raise ValueError(
             "motion command must have shape (num_envs, 3), got "
             f"{getattr(command, 'shape', None)}"
@@ -324,7 +332,9 @@ class _FootKinematicsMetric(_FootContactTerm):
         self._previous_contact[rows] = False
         self._initialized[rows] = False
 
-    def _sample(self, env: ManagerBasedRlEnv) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _sample(
+        self, env: ManagerBasedRlEnv
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         values = self._read(self._position_view, self.name)
         if values.shape != (env.num_envs, 6):
             raise ValueError(
@@ -358,12 +368,16 @@ class stance_foot_slip_speed(_FootKinematicsMetric):
         velocity, contacts, valid = self._sample(env)
         persistent_contact = contacts & previous_contact & valid[:, None]
         planar_speed = np.linalg.norm(velocity[:, :, :2], axis=2)
-        return np.asarray(np.max(planar_speed * persistent_contact, axis=1), dtype=np.float32)
+        return np.asarray(
+            np.max(planar_speed * persistent_contact, axis=1), dtype=np.float32
+        )
 
 
 def _validate_unique_selectors(label: str, selectors: Sequence[str]) -> None:
     if len(selectors) != len(set(selectors)):
-        raise ValueError(f"T800JointPositionAction {label} selectors contain duplicates")
+        raise ValueError(
+            f"T800JointPositionAction {label} selectors contain duplicates"
+        )
 
 
 @dataclass(kw_only=True)
@@ -372,7 +386,7 @@ class T800JointPositionActionCfg(JointPositionActionCfg):
 
     held_actuator_names: tuple[str, ...] | list[str]
 
-    def build(self, env: ManagerBasedRlEnv) -> "T800JointPositionAction":
+    def build(self, env: ManagerBasedRlEnv) -> T800JointPositionAction:
         return T800JointPositionAction(self, env)
 
 
@@ -385,9 +399,15 @@ class T800JointPositionAction(JointPositionAction):
 
         super().__init__(cfg, env)
         active_ids, _ = self._entity.find_joints_by_actuator_names(cfg.actuator_names)
-        held_ids, _ = self._entity.find_joints_by_actuator_names(cfg.held_actuator_names)
-        if len(set(active_ids)) != len(active_ids) or len(set(held_ids)) != len(held_ids):
-            raise ValueError("T800JointPositionAction resolved joint IDs must be unique")
+        held_ids, _ = self._entity.find_joints_by_actuator_names(
+            cfg.held_actuator_names
+        )
+        if len(set(active_ids)) != len(active_ids) or len(set(held_ids)) != len(
+            held_ids
+        ):
+            raise ValueError(
+                "T800JointPositionAction resolved joint IDs must be unique"
+            )
         if set(active_ids) & set(held_ids):
             raise ValueError("T800JointPositionAction active and held joints overlap")
         if set(active_ids) | set(held_ids) != set(range(self._entity.num_joints)):
@@ -401,7 +421,9 @@ class T800JointPositionAction(JointPositionAction):
         self._held_default_targets = np.empty(
             held_shape, dtype=self._entity.data.default_joint_pos.dtype
         )
-        self._held_encoder_bias = np.empty(held_shape, dtype=self._entity.data.encoder_bias.dtype)
+        self._held_encoder_bias = np.empty(
+            held_shape, dtype=self._entity.data.encoder_bias.dtype
+        )
 
     def apply_actions(self) -> None:
         super().apply_actions()
@@ -468,7 +490,52 @@ class penalty_close_feet_lateral(SensorTermBase):
         )
 
 
+@dataclass(kw_only=True)
+class OfficialMotionCommandCfg(MotionCommandCfg):
+    def build(self, env: ManagerBasedRlEnv) -> OfficialMotionCommand:
+        return OfficialMotionCommand(self, env)
+
+
+class OfficialMotionCommand(MotionCommand):
+    """Keep the startup encoder bias and trained adaptive-sampler decay."""
+
+    def __init__(self, cfg: OfficialMotionCommandCfg, env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        lower, upper = self._joint_default_position_range
+        self._startup_joint_default_bias = env.rng.uniform(
+            lower,
+            upper,
+            size=self.joint_default_bias.shape,
+        ).astype(self.joint_default_bias.dtype, copy=False)
+        self.joint_default_bias[:] = self._startup_joint_default_bias
+
+    def reset(self, env_ids: np.ndarray | slice | None) -> dict[str, float]:
+        ids = (
+            np.arange(self.num_envs, dtype=np.int32)
+            if env_ids is None
+            else np.arange(self.num_envs, dtype=np.int32)[env_ids]
+            if isinstance(env_ids, slice)
+            else env_ids
+        )
+        self.joint_default_bias[ids] = self._startup_joint_default_bias[ids]
+        return CommandTerm.reset(self, ids)
+
+    def _update_command(self, env_ids: np.ndarray | None) -> None:
+        # The trained branch advances this EMA every control step, including
+        # steps with no failure. UniLab 1.1 only advances it on failures.
+        if (
+            env_ids is None
+            and self.sampler.mode == "adaptive"
+            and not np.any(self._env.termination_manager.terminated)
+        ):
+            self.sampler._current_bin_failed.fill(0.0)
+            self.sampler.bin_failed_count *= 1.0 - self.sampler.adaptive_alpha
+        super()._update_command(env_ids)
+
+
 __all__ = [
+    "OfficialMotionCommand",
+    "OfficialMotionCommandCfg",
     "T800JointPositionAction",
     "T800JointPositionActionCfg",
     "command_gated_feet_phase",

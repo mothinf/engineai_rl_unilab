@@ -22,7 +22,7 @@
 
 * 两个开箱即用的 T800 25-DoF 任务：walk-flat（Manager-Based PPO / SAC，MuJoCo
   后端；SAC 另有 configured-only 的 mjwarp owner）与 motion tracking（PPO，
-  MuJoCo 后端）；
+  MuJoCo 后端；另有无 DR 的 FlashSAC mjwarp owner）；
 * 任务注册缝（seam）：`UNILAB_EXTRA_REGISTRY_PACKAGES` 环境变量让 UniLab 的
   `ensure_registries()` 导入本仓库的任务包（含 spawn 子进程）；
 * 配置组合缝：Hydra `--config-dir` 把 `src/engineai_rl_unilab/conf/<algo>` 追加进
@@ -97,6 +97,32 @@ uv run engineai-train --algo ppo --task engineai_t800_motion_tracking --sim mujo
 ```
 
 这些测试验证配置和 reset/step 契约；训练收敛及实机表现需独立评估。
+
+## T800 FlashSAC：mjwarp 无 DR 任务
+
+独立 owner 为 `conf/flashsac/task/engineai_t800_motion_tracking/mjwarp.yaml`。
+它使用单帧 WoState 观测（134 维 actor、278 维 critic、25 维动作）、固定 PD、
+分组动作尺度和关节位置奖励（权重 2.0、容差 0.8 rad）。物理频率 150 Hz，
+控制频率 50 Hz；关闭观测噪声、reset 扰动、物理随机化、外力推扰和动作延迟。
+修正速度数据的 50 Hz 动作文件 `dance1_subject2_t800_first18s_mujoco_v2.npz`
+随仓库提供，现有 PPO owner 和动作文件保持原样。
+
+默认 2048 个环境、25000 次迭代、gamma 0.99、tau 0.05、每步四次更新，
+其余 learner 设置沿用 UniLab FlashSAC 默认值。该观测和算法契约应重新训练；
+PPO 或其他 SAC 任务的 checkpoint 不能用于续训。
+
+```bash
+uv sync --extra mjwarp --group dev
+uv run --extra mjwarp engineai-train --algo flashsac --task engineai_t800_motion_tracking \
+  --sim mjwarp training.no_play=true
+uv run --extra mjwarp engineai-eval --algo flashsac --task engineai_t800_motion_tracking \
+  --sim mjwarp --load-run /absolute/path/model_25000.pt
+uv run --group dev pytest -q
+T800_TEST_MJWARP=1 uv run --extra mjwarp --group dev pytest -q tests/test_t800_flashsac.py
+```
+
+请在仓库根目录运行，mjwarp 需要 CUDA GPU。冒烟测试覆盖 reset、观测、
+step 和局部 reset；训练收敛和真机部署效果需另行评估。
 
 ## 仓库结构
 

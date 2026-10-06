@@ -28,6 +28,13 @@ dependencies = [
 engineai-train = "engineai_rl_unilab.cli:train_main"
 engineai-eval = "engineai_rl_unilab.cli:eval_main"
 
+[project.optional-dependencies]
+# GPU opt-in versions used by the T800 FlashSAC mjwarp baseline.
+mjwarp = ["mujoco-warp==3.11.0", "warp-lang==1.16.0"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.9"]
+
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"

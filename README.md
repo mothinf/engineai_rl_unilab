@@ -22,7 +22,8 @@ ships only task code (manager terms), owner configs, and robot XML assets.
 Features include:
 
 * Two ready-to-run T800 25-DoF tasks: walk-flat (Manager-Based PPO / SAC on MuJoCo;
-  SAC also has a configured-only mjwarp owner) and motion tracking (PPO on MuJoCo);
+  SAC also has a configured-only mjwarp owner) and motion tracking (PPO on MuJoCo,
+  plus a no-DR FlashSAC owner on mjwarp);
 * Task registration seam: `UNILAB_EXTRA_REGISTRY_PACKAGES` lets UniLab's
   `ensure_registries()` import this repo's task package (including spawn subprocesses);
 * Config composition seam: Hydra `--config-dir` appends
@@ -99,6 +100,36 @@ uv run engineai-train --algo ppo --task engineai_t800_motion_tracking --sim mujo
 
 The tests cover config and reset/step contracts; training convergence and on-robot
 behavior need separate evaluation.
+
+## T800 FlashSAC on mjwarp, without DR
+
+The standalone owner is
+`conf/flashsac/task/engineai_t800_motion_tracking/mjwarp.yaml`. It uses single-frame
+WoState observations (134 actor / 278 critic / 25 actions), fixed PD gains, grouped
+action scales and a joint-position reward (weight 2.0, tolerance 0.8 rad).
+Physics runs at 150 Hz and control at 50 Hz. Observation noise, reset perturbations,
+physics randomization, pushes and action latency are disabled. The corrected
+50 Hz motion clip `dance1_subject2_t800_first18s_mujoco_v2.npz` ships in the repo;
+the existing PPO owner and clip are unchanged.
+
+Defaults are 2048 environments, 25000 iterations, gamma 0.99, tau 0.05 and four
+updates per step. Remaining learner settings come from UniLab's FlashSAC defaults.
+Start a new run for this observation/algorithm contract; PPO and other SAC tasks'
+checkpoints cannot resume it.
+
+```bash
+uv sync --extra mjwarp --group dev
+uv run --extra mjwarp engineai-train --algo flashsac --task engineai_t800_motion_tracking \
+  --sim mjwarp training.no_play=true
+uv run --extra mjwarp engineai-eval --algo flashsac --task engineai_t800_motion_tracking \
+  --sim mjwarp --load-run /absolute/path/model_25000.pt
+uv run --group dev pytest -q
+T800_TEST_MJWARP=1 uv run --extra mjwarp --group dev pytest -q tests/test_t800_flashsac.py
+```
+
+Run from the repository root with a CUDA GPU for mjwarp. Runtime smoke tests
+check reset, observations, stepping and partial reset; they do not establish
+training convergence or robot deployment behavior.
 
 ## Repository Layout
 

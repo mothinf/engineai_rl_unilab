@@ -5,11 +5,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from numbers import Real
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 from unilab.envs.mdp import JointPositionAction, JointPositionActionCfg
-from unilab.managers import CommandTerm
+from unilab.managers import CommandTerm, ManagerTermBase, SceneEntityCfg
 from unilab.managers.manager_base import ManagerTermBaseCfg
 from unilab.tasks.locomotion.common.manager_terms import SensorTermBase
 from unilab.tasks.locomotion.g1.manager_terms import feet_phase as _G1FeetPhase
@@ -25,6 +25,7 @@ from unilab.utils.rotation import np_quat_apply_inverse, np_yaw_quat
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from unilab.base.entity import Entity
     from unilab.managers._types import ManagerBasedRlEnv
 
 
@@ -51,6 +52,17 @@ def _finite_real(value: Any, *, label: str, strict_positive: bool = False) -> fl
         relation = "greater than zero" if strict_positive else "non-negative"
         raise ValueError(f"{label} must be {relation}")
     return result
+
+
+def _pair(value: Any, *, name: str) -> tuple[float, float]:
+    values = np.asarray(value, dtype=np.float64)
+    if values.shape != (2,) or not np.isfinite(values).all():
+        raise ValueError(f"{name} must be a finite (min, max) pair")
+    lower, upper = float(values[0]), float(values[1])
+    if lower > upper:
+        raise ValueError(f"{name} minimum {lower} exceeds maximum {upper}")
+    return lower, upper
+
 
 
 def compute_lateral_feet_penalty(
@@ -490,6 +502,170 @@ class penalty_close_feet_lateral(SensorTermBase):
         )
 
 
+class OfficialMujocoRigidBodyMaterial(ManagerTermBase):
+    """Keep one official friction bucket per environment for the whole run.
+
+    UniLab 1.1 exposes geom-friction writes through reset transactions.  The
+    original training branch registered the same sampled values as persistent
+    startup state.  This downstream term samples once during construction and
+    re-applies those cached values on every reset, preserving the trained
+    per-environment distribution without reaching into backend-private state.
+    """
+
+    def __init__(self, cfg: ManagerTermBaseCfg, env: ManagerBasedRlEnv):
+        super().__init__(env)
+        if getattr(cfg, "mode", None) != "reset":
+            raise NotImplementedError(
+                "OfficialMujocoRigidBodyMaterial only supports mode='reset'"
+            )
+        params = cfg.params
+        allowed = {
+            "asset_cfg",
+            "static_friction_range",
+            "dynamic_friction_range",
+            "restitution_range",
+            "num_buckets",
+        }
+        unknown = sorted(set(params) - allowed)
+        if unknown:
+            raise ValueError(
+                f"official material randomization has unknown parameters {unknown}"
+            )
+        ranges = np.asarray(
+            (
+                _pair(params["static_friction_range"], name="static_friction_range"),
+                _pair(params["dynamic_friction_range"], name="dynamic_friction_range"),
+                _pair(params["restitution_range"], name="restitution_range"),
+            ),
+            dtype=np.float64,
+        )
+        num_buckets = params["num_buckets"]
+        if (
+            isinstance(num_buckets, bool)
+            or not isinstance(num_buckets, int)
+            or num_buckets < 1
+        ):
+            raise ValueError("num_buckets must be a positive integer")
+        asset_cfg = params["asset_cfg"]
+        if not isinstance(asset_cfg, SceneEntityCfg):
+            raise TypeError("asset_cfg must be a SceneEntityCfg")
+
+        self._entity = cast("Entity", env.scene[asset_cfg.name])
+        self._geom_ids, default_friction = self._entity.bind_geom_friction_write(
+            asset_cfg.geom_ids,
+            term_name="official_mujoco_rigid_body_material",
+        )
+        self.material_buckets = env.rng.uniform(
+            ranges[:, 0],
+            ranges[:, 1],
+            size=(num_buckets, 3),
+        )
+        bucket_ids = env.rng.integers(
+            0,
+            num_buckets,
+            size=(env.num_envs, default_friction.shape[0]),
+        )
+        self._values = np.broadcast_to(
+            default_friction,
+            (env.num_envs, *default_friction.shape),
+        ).copy()
+        # MuJoCo has one sliding coefficient.  Preserve the model's torsional
+        # and rolling friction while mapping the official dynamic bucket.
+        self._values[:, :, 0] = self.material_buckets[bucket_ids, 1]
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        env_ids: np.ndarray | slice | None,
+        asset_cfg: SceneEntityCfg,
+        static_friction_range: tuple[float, float],
+        dynamic_friction_range: tuple[float, float],
+        restitution_range: tuple[float, float],
+        num_buckets: int,
+    ) -> None:
+        del (
+            asset_cfg,
+            static_friction_range,
+            dynamic_friction_range,
+            restitution_range,
+            num_buckets,
+        )
+        ids = (
+            np.arange(env.num_envs, dtype=np.int32)
+            if env_ids is None
+            else np.arange(env.num_envs, dtype=np.int32)[env_ids]
+            if isinstance(env_ids, slice)
+            else env_ids
+        )
+        self._entity.write_geom_friction_to_sim(
+            self._values[ids],
+            geom_ids=self._geom_ids,
+            env_ids=ids,
+            term_name="official_mujoco_rigid_body_material",
+        )
+
+
+
+class OfficialFixedRigidBodyCom(ManagerTermBase):
+    """Sample the official waist CoM offset once and restore it on reset."""
+
+    def __init__(self, cfg: ManagerTermBaseCfg, env: ManagerBasedRlEnv):
+        super().__init__(env)
+        if getattr(cfg, "mode", None) != "reset":
+            raise NotImplementedError(
+                "OfficialFixedRigidBodyCom only supports mode='reset'"
+            )
+        params = cfg.params
+        if set(params) != {"asset_cfg", "com_range"}:
+            raise ValueError(
+                "official CoM randomization requires asset_cfg and com_range"
+            )
+        asset_cfg = params["asset_cfg"]
+        if not isinstance(asset_cfg, SceneEntityCfg):
+            raise TypeError("asset_cfg must be a SceneEntityCfg")
+        com_range = params["com_range"]
+        if set(com_range) != {"x", "y", "z"}:
+            raise ValueError("com_range must define exactly x, y, and z")
+        ranges = np.asarray(
+            [_pair(com_range[axis], name=f"com_range.{axis}") for axis in "xyz"],
+            dtype=np.float64,
+        )
+        self._entity = cast("Entity", env.scene[asset_cfg.name])
+        self._body_ids, default_ipos = self._entity.bind_body_ipos_write(
+            asset_cfg.body_ids,
+            term_name="official_fixed_rigid_body_com",
+        )
+        offsets = env.rng.uniform(
+            ranges[:, 0],
+            ranges[:, 1],
+            size=(env.num_envs, 3),
+        )
+        self._values = default_ipos[None, :, :] + offsets[:, None, :]
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        env_ids: np.ndarray | slice | None,
+        asset_cfg: SceneEntityCfg,
+        com_range: dict[str, tuple[float, float]],
+    ) -> None:
+        del asset_cfg, com_range
+        ids = (
+            np.arange(env.num_envs, dtype=np.int32)
+            if env_ids is None
+            else np.arange(env.num_envs, dtype=np.int32)[env_ids]
+            if isinstance(env_ids, slice)
+            else env_ids
+        )
+        self._entity.write_body_ipos_to_sim(
+            self._values[ids],
+            body_ids=self._body_ids,
+            env_ids=ids,
+            term_name="official_fixed_rigid_body_com",
+        )
+
+
+
 @dataclass(kw_only=True)
 class OfficialMotionCommandCfg(MotionCommandCfg):
     def build(self, env: ManagerBasedRlEnv) -> OfficialMotionCommand:
@@ -534,8 +710,10 @@ class OfficialMotionCommand(MotionCommand):
 
 
 __all__ = [
+    "OfficialFixedRigidBodyCom",
     "OfficialMotionCommand",
     "OfficialMotionCommandCfg",
+    "OfficialMujocoRigidBodyMaterial",
     "T800JointPositionAction",
     "T800JointPositionActionCfg",
     "command_gated_feet_phase",

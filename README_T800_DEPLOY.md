@@ -1,5 +1,29 @@
 # T800 真机部署与操作（官方 Native SDK）
 
+## 最简操作流程（SDK 已部署）
+
+适用于自己的 SDK、权重和轨迹已下发到真机的情况；首次部署见下文第 1～2 节。
+
+1. **开机、解除上电急停**：机器人开机后，用官方 RC02 遥控器按 `BACK + START`，确认进入白灯 / 可运行状态。F710 接收器插在板载 PC，设为 X 模式、MODE 灯灭。
+2. **启动自己的 SDK**：机器人获得支撑后，在开发机终端执行下列命令。若提示旧进程仍在运行，先按第 4 节清理，再启动。
+
+   ```bash
+   ssh user@192.168.0.163
+   sudo systemctl stop robotics.service
+   cd ~/projects/uni_t800_ppo
+   sudo ./run_robot.sh t800
+   ```
+
+3. **机器人躺好、摆正**：保持吊架或辅助支撑，将机器人躺姿和四肢摆正。F710 松键、摇杆回中至少 0.25 秒。
+4. **依次进入 passive、pd_stand**：F710 按 `LB + RB` 进入 `passive`，再按 `LB + A` 进入 `pd_stand`；每次切换成功后立即松键。
+5. **吊起至站姿**：保持 `pd_stand`，用吊架将机器人吊起、扶正至站姿，双脚落地并确认站稳，继续保留支撑。
+6. **walk → dance**：按 `LB + B` 切到 `walk`，摇杆回中、确认稳定后，按 `RB + B` 开始 `dance`。
+7. **随时回 passive，结束后进 idle**：运行中可随时按 `LB + RB` 回到 `passive`；dance 播放完也会自动回到 `passive`。机器人获得支撑后，再按 `LB + START` 进入 `idle`，最后在 SDK 终端按 `Ctrl+C` 退出。
+
+`passive` 仅提供阻尼，不能主动维持站立平衡；保持支撑并保留实体急停。
+
+---
+
 执行顺序：**连接机器人 → 下发 SDK → RC02 解锁 → 清理旧进程并启动 → F710 进入 dance → 退出并清理进程**。
 
 本文基于 `0921.md` 的现场记录，并核对了本地已适配 UniLab 的官方 Native SDK。真机由 SDK 的 `src_executor` 控制，dance 使用已准备好的 MNN 策略与 NPZ 轨迹。下面直接使用现有部署包；更换策略的方法放在文末。

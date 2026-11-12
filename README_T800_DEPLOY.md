@@ -20,10 +20,10 @@
    sudo ./run_robot.sh t800
    ```
 
-3. **机器人躺好、摆正**：保持吊架或辅助支撑，将机器人躺姿和四肢摆正。F710 松键、摇杆回中，等待输入稳定。
-4. **依次进入 passive、pd_stand**：F710 按 `LB + RB` 进入 `passive`，再按 `LB + A` 进入 `pd_stand`；每次切换成功后立即松键。
-5. **吊起至站姿**：保持 `pd_stand`，用吊架将机器人吊起、扶正至站姿，双脚落地并确认站稳，继续保留支撑。
-6. **walk → dance**：按 `LB + B` 切到 `walk`，摇杆回中、确认稳定后，按 `RB + B` 开始 `dance`。
+3. **先将机器人吊起、摆正**：用吊架将机器人吊起并扶正，双脚保持悬空。F710 松键、摇杆回中，等待输入稳定。
+4. **双脚悬空时切 pd_stand**：保持吊架支撑，F710 按 `LB + RB` 进入 `passive`，再按 `LB + A` 进入 `pd_stand`，等待姿态稳定；双脚悬空时可以切入 `pd_stand`，每次切换成功后立即松键。
+5. **稍微下放，双脚踩实地面**：保持 `pd_stand`，用吊架缓慢下放一点机器人，让双脚踩实地面，继续保留吊架支撑。
+6. **脚踩实后切 walk → dance**：确认双脚已踩实地面，再按 `LB + B` 切到 `walk`；摇杆回中、确认稳定后，按 `RB + B` 开始 `dance`。
 7. **随时回 passive，结束后进 idle**：运行中可随时按 `LB + RB` 回到 `passive`；dance 播放完也会自动回到 `passive`。机器人获得支撑后，再按 `LB + START` 进入 `idle`，最后在 SDK 终端按 `Ctrl+C` 退出。
 
 `passive` 仅提供阻尼，不能主动维持站立平衡；保持支撑并保留实体急停。
@@ -146,8 +146,8 @@ sudo ./run_robot.sh t800
 ```mermaid
 flowchart LR
     I["idle · 空闲"] -->|"LB + RB"| P["passive · 阻尼"]
-    P -->|"LB + A"| S["pd_stand · 站立"]
-    S -->|"LB + B"| W["walk · 行走策略"]
+    P -->|"吊起、双脚悬空时 LB + A"| S["pd_stand · 站立"]
+    S -->|"下放、双脚踩实后 LB + B"| W["walk · 行走策略"]
     W -->|"RB + B"| D["dance · 动作跟踪"]
     S -.->|"LB + RB"| P
     W -.->|"LB + RB"| P
@@ -160,8 +160,8 @@ flowchart LR
 | 顺序 | 当前状态 → 目标状态 | F710 按键 | 操作说明 |
 | --- | --- | --- | --- |
 | ① | `idle → passive` | `LB + RB` | 上阻尼，等待使能成功 |
-| ② | `passive → pd_stand` | `LB + A` | 等待站稳 |
-| ③ | `pd_stand → walk` | `LB + B` | 先保持摇杆回中，确认稳定 |
+| ② | `passive → pd_stand` | `LB + A` | 先吊起并扶正，双脚悬空时切入，等待姿态稳定 |
+| ③ | `pd_stand → walk` | `LB + B` | 保持 pd_stand 稍微下放，双脚踩实地面后切入；摇杆回中 |
 | ④ | `walk → dance` | `RB + B` | 开始动作跟踪 |
 | ⑤ | `dance → passive` | 无需按键 | 轨迹播放结束自动回到阻尼 |
 

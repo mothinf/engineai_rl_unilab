@@ -1,6 +1,6 @@
 # EngineAI Native SDK：人形机器人原生控制开发框架
 
-> 此 `deploy` 分支基于众擎官方 Native SDK，加入 UniLab T800 134 维策略的部署接线。先看 [T800 UniLab 部署说明](README_T800_UNILAB.md)；训练代码仍在训练分支。
+> 此 `deploy` 分支基于众擎官方 Native SDK，加入 UniLab T800 134 维策略的部署接线。先看 [T800 真机部署与操作主指南](README_T800_DEPLOY.md)：快速上手、编译下发、进程清理和 walk → dance 流程。模型准备及不同实验适配见[配套指南](README_T800_UNILAB.md)；训练代码仍在训练分支。
 >
 > 近期 A12/JP3/N05（329 维）、C（137 维）、F（329 维）、H（653 维）需要适配，不能直接换权重。请先看[兼容性表](README_T800_UNILAB.md#compatibility)和[配置与代码修改指南](README_T800_UNILAB.md#adapt-policy)；即使同为 134 维，也要核对观测、scale 和 PD。
 

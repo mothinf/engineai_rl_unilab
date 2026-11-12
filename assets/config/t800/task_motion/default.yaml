@@ -34,7 +34,6 @@ tasks:
     manual_transition:
       - passive
       - walk
-      - dance
     key: [LB, A]
 
   - motion: walk

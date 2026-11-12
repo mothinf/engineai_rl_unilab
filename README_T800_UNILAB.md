@@ -1,4 +1,6 @@
-# UniLab T800：Native SDK 部署分支
+# UniLab T800：模型准备、适配与仿真验收
+
+现场操作以 [T800 真机部署与操作主指南](README_T800_DEPLOY.md)为准。本文集中说明模型兼容性、参数与观测扩展、准备脚本和仿真验收。
 
 本分支以[众擎官方 Native SDK](https://github.com/engineai-robotics/engineai_robotics_native_sdk)的 `335c60e` 为基底，保留 SDK 的构建、MuJoCo 仿真、F710 状态机和真机下发流程；只接入 UniLab T800 motion-tracking 所需的配置、runner 防护和独立 sim2sim。训练代码在训练分支，不需要把两套仓库合并。
 
@@ -182,24 +184,12 @@ python scripts/sim2sim_unilab_t800.py \
 
 ## 3. 真机下发与现场操作
 
-只有仿真、模型契约及安全审查完成后才考虑下发。由操作者确认机器人型号、网络、固件和有支撑的试验场地；首次动作使用吊架/辅助支撑，保留实体急停，人员远离机器人运动范围。这里的命令不会在本次代码修改中自动执行。
+完成模型准备与仿真验收后，按 [现场操作主指南](README_T800_DEPLOY.md)执行连接、编译下发、启动前后进程清理和 F710 状态切换。
 
-交叉编译，并显式指定 **专用远端目录**（`install.sh` 使用 `rsync --delete`）：
-
-```bash
-./build.sh -a aarch64 -r humble -t release -j2
-export ENGINEAI_REMOTE_USER="your-user"
-export ENGINEAI_REMOTE_HOST="your-robot-ip"
-export ENGINEAI_REMOTE_DIR="~/projects/uni_t800_ppo"
-./install.sh t800 robot aarch64
-```
-
-真机上按照官方流程先用 RC02 解除开机急停，确保 F710 为 X 模式、摇杆回中；停止冲突的旧运控程序后，从部署目录运行 `sudo ./run_robot.sh t800`。不要同时运行官方运控服务和这套 SDK。F710 状态顺序：`idle` 经 `LB+RB` 到 `passive`，`LB+A` 到 `pd_stand`，`LB+B` 到 `walk`，`RB+B` 进入 `dance`；当前状态机也允许从 `pd_stand` 直接进入 `dance`，是否适合这样入场仍取决于参考首帧。结束时自动回 `passive`；中途可用 `LB+RB` 返回 `passive`，异常时优先实体急停。各组合键生效后松开，再按下一组。
-
-**注意：** 现有状态机进入 `dance` 时没有入场轨迹插值；若站立状态与参考首帧差距过大，可能有目标突变。真机进入 `dance` 前必须逐项核对。退出时先让机器人获得支撑并回安全状态，再结束程序；不要把 `passive` 当作主动站稳。
+本分支统一采用 `idle → passive → pd_stand → walk → dance` 的入场顺序，**只能从 `walk` 进入 `dance`**；`pd_stand → dance` 入口已移除。dance 完成后自动返回 passive。当前没有入场轨迹插值，首帧姿态匹配与退出时的支撑要求见主指南。
 
 ## 验证边界
 
 准备脚本检查六个运动字段、名称和帧率；部署 runner 再对其实际消费的关节参考、根姿态、观测和动作做运行时检查，并对关节目标角限幅。两者都不能验证机械可达性、扭矩/温度/通讯链路和真机状态估计质量。本分支没有自动 SSH、没有自动下发、没有执行真机试验。
 
-2026-11-12 的兼容性检查覆盖本分支源码、近期实验 profile 和实际 ONNX 格式/维度；本次只更新文档，未迁移新观测实现、重跑 SDK 仿真或执行真机试验。
+2026-11-12 的兼容性检查覆盖本分支源码、近期实验 profile 和实际 ONNX 格式/维度；该兼容性核查未迁移新观测实现、重跑 SDK 仿真或执行真机试验；现场指南迁入时另将状态配置收紧为仅允许 walk 进入 dance。

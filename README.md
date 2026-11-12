@@ -1,6 +1,6 @@
 # EngineAI Native SDK: Native Control Framework for Humanoid Robots
 
-> This `deploy` branch is based on the official EngineAI Native SDK and contains the UniLab T800 deployment integration. Start with [T800 UniLab deployment](README_T800_UNILAB.md). The training code remains on the training branch.
+> This `deploy` branch is based on the official EngineAI Native SDK and contains the UniLab T800 deployment integration. Start with the [T800 deployment and operation guide](README_T800_DEPLOY.md) (Chinese): quick start, installation, process cleanup, and the walk → dance sequence. For policy preparation and experiment compatibility, see the [model adaptation guide](README_T800_UNILAB.md). The training code remains on the training branch.
 >
 > The current end-to-end path implements the original **134-input / 25-output, 50 Hz** policy contract. Recent FlashMimic A12/JP3/N05 (329 inputs), C (137), F (329), and H (653) policies require adaptation; replacing weights or changing the dimension alone is insufficient. See the [compatibility matrix](README_T800_UNILAB.md#compatibility) and [configuration/code adaptation guide](README_T800_UNILAB.md#adapt-policy) (Chinese), including observation order, reference windows, action scales, PD, profile selection, and validation.
 

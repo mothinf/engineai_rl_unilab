@@ -1,0 +1,41 @@
+# UniLab T800 motion-tracking policy deployed by the official SDK dance task.
+# The deploy assets are supplied by scripts/prepare_t800_unilab.py; no checkpoint is bundled.
+policy_file: "rl_unilab_motion_tracking/policy.mnn"
+trajectory_file_npz: "rl_unilab_motion_tracking/motion.npz"
+trajectory_body_index: 1
+expected_observation_dim: 134
+expected_motion_fps: 50
+
+joint_names: [
+  "J00_HIP_PITCH_L", "J01_HIP_ROLL_L", "J02_HIP_YAW_L", "J03_KNEE_PITCH_L",
+  "J04_ANKLE_PITCH_L", "J05_ANKLE_ROLL_L", "J06_HIP_PITCH_R", "J07_HIP_ROLL_R",
+  "J08_HIP_YAW_R", "J09_KNEE_PITCH_R", "J10_ANKLE_PITCH_R", "J11_ANKLE_ROLL_R",
+  "J12_TORSO_YAW", "J13_SHOULDER_PITCH_L", "J14_SHOULDER_ROLL_L",
+  "J15_SHOULDER_YAW_L", "J16_ELBOW_PITCH_L", "J17_ELBOW_YAW_L",
+  "J18_SHOULDER_PITCH_R", "J19_SHOULDER_ROLL_R", "J20_SHOULDER_YAW_R",
+  "J21_ELBOW_PITCH_R", "J22_ELBOW_YAW_R", "J23_HEAD_PITCH", "J24_HEAD_YAW"
+]
+default_joint_pos: [
+  -0.06, 0.0, 0.0, 0.12, -0.06, 0.0, -0.06, 0.0, 0.0, 0.12, -0.06, 0.0,
+  0.0, 0.0, 0.15, 0.0, -0.25, 0.0, 0.0, -0.15, 0.0, -0.25, 0.0, 0.0, 0.0
+]
+# Tracking gains used by the validated 134D T800 checkpoint; other policies must
+# match their own training PD gains before deployment.
+joint_stiffness: [180, 100, 100, 180, 40, 40, 180, 100, 100, 180, 40, 40, 100, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50]
+joint_damping: [5, 3, 3, 5, 2, 2, 5, 3, 3, 5, 2, 2, 3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3]
+action_scale: [0.5, 0.2, 0.2, 0.5, 0.5, 0.2, 0.5, 0.2, 0.2, 0.5, 0.5, 0.2, 0.2, 0.2, 0.2, 0.05, 0.2, 0.05, 0.2, 0.2, 0.05, 0.2, 0.05, 0.2, 0.2]
+
+# UniLab policy observation: [ref_q(25), ref_qd(25), ref_anchor_ori(6),
+# base_ang_vel(3), q-default(25), qd(25), action(25)] = 134 elements.
+observation_names: ["command", "motion_anchor_ori_b", "base_ang_vel", "joint_pos", "joint_vel", "actions"]
+observation_history_lengths: [1, 1, 1, 1, 1, 1]
+# UniLab's JointPositionAction applies action * scale around the robot's
+# default pose; the motion reference is an observation target, not an absolute
+# actuator target.
+resident_control: false
+
+# Training position-actuator ctrlrange, in joint_names order; also verified
+# against the above run's MuJoCo asset at UniLab commit 50fe86a.
+# This is not a parallel-ankle reachability envelope or a motor torque limit.
+target_position_lower: [-3.316, -1.082, -1.42245, -0.261667, -0.68068, -0.3491, -3.316, -2.059, -3.60228, -0.261667, -0.68068, -0.1745, -4.381, -2.967, -0.384, -2.618, -2.286, -2.618, -2.967, -2.443, -2.618, -2.286, -2.618, -0.523, -1.222]
+target_position_upper: [2.269, 2.059, 3.60228, 2.355, 0.68068, 0.1745, 2.269, 1.082, 1.42245, 2.355, 0.68068, 0.3491, 1.2392, 2.793, 2.443, 2.618, 0.262, 2.618, 2.793, 0.384, 2.618, 0.262, 2.618, 0.523, 1.222]

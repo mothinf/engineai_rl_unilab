@@ -4,6 +4,7 @@
 
 #include "basic/motion_runner.h"
 #include "basic/runner_registry.h"
+#include "rl_dance_example/target_position_limits.h"
 #include "rl_dance_example/wbt_obs_registry.h"
 #include "rl_dance_example_param/rl_dance_example_param.h"
 
@@ -30,8 +31,9 @@ class RlDanceExampleRunner : public MotionRunner {
   void TeardownContext() override;
 
  private:
-  void CalculateObservation();
-  void CalculateMotorCommand();
+  bool CalculateObservation();
+  bool CalculateMotorCommand();
+  void FaultCommand(const char* reason);
   void SendMotorCommand();
   void initHistoryBuffers();
   void fillObsContextConstantPart();
@@ -48,6 +50,7 @@ class RlDanceExampleRunner : public MotionRunner {
   std::shared_ptr<const Eigen::MatrixXd> ref_joint_pos_all_;
   std::shared_ptr<const Eigen::MatrixXd> ref_joint_vel_all_;
   std::shared_ptr<const Eigen::MatrixXd> ref_body_quat_w_all_;
+  int trajectory_body_index_ = 0;
   cnpy::npz_t trajectory_npz;
   int max_policy_step = 0;
 
@@ -74,6 +77,8 @@ class RlDanceExampleRunner : public MotionRunner {
   Eigen::VectorXd joint_kp_;
   Eigen::VectorXd joint_kd_;
   Eigen::VectorXd action_scale_;
+  wbt::TargetPositionLimits target_position_limits_;
+  bool command_fault_ = true;
 
   Eigen::Matrix3d ref_init_yaw_rot_;
   Eigen::Matrix3d body_init_yaw_rot_;

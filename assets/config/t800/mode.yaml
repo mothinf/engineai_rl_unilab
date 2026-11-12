@@ -51,6 +51,8 @@ mode:
       scope: rl_stance_to_supine/default
     - tag: rl_dance_example
       scope: rl_dance_example/default
+    - tag: unilab_motion_tracking
+      scope: rl_unilab_motion_tracking/default
       
   sim:
     - tag: resident_task
@@ -89,3 +91,5 @@ mode:
       scope: rl_stance_to_supine/default
     - tag: rl_dance_example
       scope: rl_dance_example/default
+    - tag: unilab_motion_tracking
+      scope: rl_unilab_motion_tracking/default

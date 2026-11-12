@@ -32,6 +32,10 @@ docker/artifacts/
 *.tmp
 /core/lib
 
+# User-provided T800 UniLab deployment artifacts (not part of this branch).
+/assets/config/t800/rl_unilab_motion_tracking/policy.mnn
+/assets/config/t800/rl_unilab_motion_tracking/motion.npz
+
 # Isaac-Sim packman
 _isaac_sim*
 _repo

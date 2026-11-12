@@ -7,10 +7,20 @@
 # Exits on error
 set -e
 
-# !!! Sets the remote user and host
-remote_user="user"
-remote_host="192.168.0.163"
-remote_dir="~/projects/engineai_robotics"
+# Remote deployment is destructive (rsync --delete). Require an explicit target.
+remote_user="${ENGINEAI_REMOTE_USER:?Set ENGINEAI_REMOTE_USER for the intended robot}"
+remote_host="${ENGINEAI_REMOTE_HOST:?Set ENGINEAI_REMOTE_HOST for the intended robot}"
+remote_dir="${ENGINEAI_REMOTE_DIR:?Set ENGINEAI_REMOTE_DIR under ~/projects/}"
+if [[ ! "$remote_user" =~ ^[a-z_][a-z0-9_-]*$ ||
+      ! "$remote_host" =~ ^[A-Za-z0-9.-]+$ ||
+      "$remote_dir" != "~/projects/"* ||
+      "$remote_dir" == "~/projects/" ||
+      "$remote_dir" == *".."* ||
+      ! "$remote_dir" =~ ^[A-Za-z0-9_./~-]+$ ]]; then
+    echo "Unsafe remote target; use a dedicated ~/projects/<name> directory." >&2
+    exit 1
+fi
+echo "[install] destination: ${remote_user}@${remote_host}:${remote_dir} (rsync --delete)"
 
 # Sets the remote destination
 remote_dest="${remote_user}@${remote_host}"

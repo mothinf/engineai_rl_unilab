@@ -1,5 +1,9 @@
 # EngineAI Native SDK：人形机器人原生控制开发框架
 
+> 此 `deploy` 分支基于众擎官方 Native SDK，加入 UniLab T800 134 维策略的部署接线。先看 [T800 UniLab 部署说明](README_T800_UNILAB.md)；训练代码仍在训练分支。
+>
+> 近期 A12/JP3/N05（329 维）、C（137 维）、F（329 维）、H（653 维）需要适配，不能直接换权重。请先看[兼容性表](README_T800_UNILAB.md#compatibility)和[配置与代码修改指南](README_T800_UNILAB.md#adapt-policy)；即使同为 134 维，也要核对观测、scale 和 PD。
+
 中文 | [English](README.md)
 
 **文档：** [EngineAI Native SDK 文档](https://dx3a2bminsq.feishu.cn/wiki/KyD9wDc4mi03uXkTVuAc5LQan4C)
@@ -322,12 +326,12 @@ NVIDIA_GPU_AVAILABLE=y
 
 #### 1.6.1 配置安装目标并下发
 
-编辑 `install.sh` 中的部署目标参数：
+下发前显式指定目标（脚本会在此专用目录执行 `rsync --delete`）：
 
 ```bash
-remote_user="user"
-remote_host="192.168.0.163"
-remote_dir="~/projects/engineai_robotics"
+export ENGINEAI_REMOTE_USER="your-user"
+export ENGINEAI_REMOTE_HOST="your-robot-ip"
+export ENGINEAI_REMOTE_DIR="~/projects/native_sdk"
 ```
 
 执行安装：

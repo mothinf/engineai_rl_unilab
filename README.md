@@ -1,5 +1,9 @@
 # EngineAI Native SDK: Native Control Framework for Humanoid Robots
 
+> This `deploy` branch is based on the official EngineAI Native SDK and contains the UniLab T800 deployment integration. Start with [T800 UniLab deployment](README_T800_UNILAB.md). The training code remains on the training branch.
+>
+> The current end-to-end path implements the original **134-input / 25-output, 50 Hz** policy contract. Recent FlashMimic A12/JP3/N05 (329 inputs), C (137), F (329), and H (653) policies require adaptation; replacing weights or changing the dimension alone is insufficient. See the [compatibility matrix](README_T800_UNILAB.md#compatibility) and [configuration/code adaptation guide](README_T800_UNILAB.md#adapt-policy) (Chinese), including observation order, reference windows, action scales, PD, profile selection, and validation.
+
 [中文](README_CN.md) | English
 
 **Documentation:** [EngineAI Native SDK Documentation](https://dx3a2bminsq.feishu.cn/wiki/KyD9wDc4mi03uXkTVuAc5LQan4C)
@@ -334,12 +338,12 @@ After restarting the container, GPU-accelerated rendering will be available.
 
 #### 1.6.1 Configure Deployment Target
 
-Edit the deployment target parameters in `install.sh`:
+Set an explicit target before running `install.sh` (it uses `rsync --delete` in the dedicated directory):
 
 ```bash
-remote_user="user"
-remote_host="192.168.0.163"
-remote_dir="~/projects/engineai_robotics"
+export ENGINEAI_REMOTE_USER="your-user"
+export ENGINEAI_REMOTE_HOST="your-robot-ip"
+export ENGINEAI_REMOTE_DIR="~/projects/native_sdk"
 ```
 
 Execute the installation:

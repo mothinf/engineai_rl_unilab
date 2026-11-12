@@ -1,6 +1,7 @@
 #pragma once
 
 #include <iostream>
+#include <optional>
 #include <string>
 
 #include "basic_param/basic_param.h"
@@ -16,6 +17,9 @@ class RlDanceExampleParam : public BasicParam {
 
   std::string LOAD_PARAM(policy_file);
   std::string LOAD_PARAM(trajectory_file_npz);
+  int LOAD_PARAM_DEFAULT(trajectory_body_index, 0);
+  int LOAD_PARAM_DEFAULT(expected_observation_dim, 0);
+  int LOAD_PARAM_DEFAULT(expected_motion_fps, 0);
 
   std::vector<std::string> LOAD_PARAM(joint_names);
   Eigen::VectorXd LOAD_PARAM(joint_stiffness);
@@ -26,6 +30,8 @@ class RlDanceExampleParam : public BasicParam {
   std::vector<int> LOAD_PARAM(observation_history_lengths);
   Eigen::VectorXd LOAD_PARAM(action_scale);
   bool LOAD_PARAM(resident_control);
+  std::optional<Eigen::VectorXd> LOAD_PARAM(target_position_lower);
+  std::optional<Eigen::VectorXd> LOAD_PARAM(target_position_upper);
 
   int num_actions;
 };

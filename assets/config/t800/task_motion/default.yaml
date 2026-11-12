@@ -55,11 +55,11 @@ tasks:
     runner:
       - name: rl_dance_example_runner
         enabled: true
+        param_tag: unilab_motion_tracking
     manual_transition:
       - passive
-      - pd_stand
       - walk
-    auto_transition: walk
+    auto_transition: passive
     key: [RB, B]
 
   - motion: supine_to_stance

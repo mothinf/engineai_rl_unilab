@@ -31,6 +31,7 @@
 #include "rl_dance_example/rl_dance_example_runner.h"
 
 #include <glog/logging.h>
+#include <stdexcept>
 
 #include "math/rotation_matrix.h"
 #include "rl_dance_example/wbt_obs_registry.h"
@@ -68,6 +69,9 @@ void RlDanceExampleRunner::TeardownContext() {}
  * @return true if initialization succeeds, false on parameter or model load failure.
  */
 bool RlDanceExampleRunner::Enter() {
+  command_fault_ = true;
+  GetMutableOutput().Reset();
+  try {
   // --- Step 1: Parameter loading ---
   // Reload parameters if a tag has been set (supports runtime config switching)
   if (!param_tag_.empty()) {
@@ -76,6 +80,26 @@ bool RlDanceExampleRunner::Enter() {
   if (!param_) {
     LOG(ERROR) << "[WbtRunner::Enter] Failed to create WbtParam";
     return false;
+  }
+
+  if (param_->num_actions != 25 || param_->joint_names.size() != 25 ||
+      param_->observation_names.size() != param_->observation_history_lengths.size()) {
+    throw std::runtime_error("invalid T800 policy joint/observation dimensions");
+  }
+  for (const auto* values : {&param_->joint_stiffness, &param_->joint_damping,
+                             &param_->default_joint_pos, &param_->action_scale}) {
+    if (values->size() != param_->num_actions || !values->allFinite()) {
+      throw std::runtime_error("invalid T800 joint parameter vector");
+    }
+  }
+  if ((param_->joint_stiffness.array() < 0).any() || (param_->joint_damping.array() < 0).any()) {
+    throw std::runtime_error("negative T800 PD gain");
+  }
+  for (size_t i = 0; i < param_->observation_names.size(); ++i) {
+    if (param_->observation_history_lengths[i] <= 0 ||
+        GetObservationDim(param_->observation_names[i]) <= 0) {
+      throw std::runtime_error("unknown observation or invalid history length");
+    }
   }
 
   // --- Step 2: Joint PD gains and index mapping ---
@@ -91,6 +115,8 @@ bool RlDanceExampleRunner::Enter() {
     int deploy_idx = model_param_->joint_id_in_total_limb.at(param_->joint_names[i]);
     (*policy2deploy_joint_idx_)(static_cast<int>(i)) = deploy_idx;
   }
+  target_position_limits_.Configure(model_param_->num_total_joints, *policy2deploy_joint_idx_,
+                                    param_->target_position_lower, param_->target_position_upper);
 
   // Apply PD gains and default positions only to the policy-controlled joints
   joint_kp_(*policy2deploy_joint_idx_) = param_->joint_stiffness;
@@ -109,6 +135,10 @@ bool RlDanceExampleRunner::Enter() {
 
   // Compute the total observation dimension (sum of all observation components × their history lengths)
   int total_obs_dim = ComputeTotalObservationDim();
+  if (total_obs_dim <= 0 || (param_->expected_observation_dim > 0 &&
+      total_obs_dim != param_->expected_observation_dim)) {
+    throw std::runtime_error("policy observation dimension differs from YAML contract");
+  }
   mlp_net_observation_vec.setZero(total_obs_dim);
   mlp_net_action_ = std::make_shared<Eigen::VectorXd>(Eigen::VectorXd::Zero(param_->num_actions));
 
@@ -124,9 +154,33 @@ bool RlDanceExampleRunner::Enter() {
   std::string traj_path =
       common::PathJoin(common::GlobalPathManager::GetInstance().GetConfigPath(), param_->trajectory_file_npz);
   trajectory_npz = cnpy::npz_load(traj_path);
+  for (const auto* key : {"joint_pos", "joint_vel", "body_quat_w"}) {
+    if (trajectory_npz.count(key) == 0) throw std::runtime_error(std::string("missing NPZ field: ") + key);
+  }
+  if (param_->expected_motion_fps > 0) {
+    if (trajectory_npz.count("fps") == 0 || trajectory_npz.at("fps").word_size != sizeof(int) ||
+        trajectory_npz.at("fps").num_vals != 1 ||
+        *trajectory_npz.at("fps").data<int>() != param_->expected_motion_fps) {
+      throw std::runtime_error("motion fps does not match policy period");
+    }
+  }
+  trajectory_body_index_ = param_->trajectory_body_index;
   ref_joint_pos_all_ = std::make_shared<const Eigen::MatrixXd>(npyFloatToMatrixXd(trajectory_npz["joint_pos"]));
   ref_joint_vel_all_ = std::make_shared<const Eigen::MatrixXd>(npyFloatToMatrixXd(trajectory_npz["joint_vel"]));
-  ref_body_quat_w_all_ = std::make_shared<const Eigen::MatrixXd>(npyFloatToMatrixXd(trajectory_npz["body_quat_w"]));
+  ref_body_quat_w_all_ = std::make_shared<const Eigen::MatrixXd>(
+      npyFloatToMatrixXd(trajectory_npz["body_quat_w"], trajectory_body_index_));
+  if (ref_joint_pos_all_->rows() == 0 || ref_joint_pos_all_->cols() != param_->num_actions ||
+      ref_joint_vel_all_->rows() != ref_joint_pos_all_->rows() ||
+      ref_joint_vel_all_->cols() != param_->num_actions ||
+      ref_body_quat_w_all_->rows() != ref_joint_pos_all_->rows() ||
+      ref_body_quat_w_all_->cols() != 4 || !ref_joint_pos_all_->allFinite() ||
+      !ref_joint_vel_all_->allFinite() || !ref_body_quat_w_all_->allFinite()) {
+    throw std::runtime_error("invalid motion array shape or nonfinite value");
+  }
+  for (int row = 0; row < ref_body_quat_w_all_->rows(); ++row) {
+    const double norm = ref_body_quat_w_all_->row(row).norm();
+    if (norm < 0.99 || norm > 1.01) throw std::runtime_error("motion quaternion not normalized");
+  }
   max_policy_step = ref_joint_pos_all_->rows() - 1;
 
   // --- Step 6: Reset runtime state ---
@@ -139,7 +193,15 @@ bool RlDanceExampleRunner::Enter() {
 
   LOG(INFO) << "[WbtRunner::Enter] Done, obs_dim=" << total_obs_dim << ", actions=" << param_->num_actions
             << ", frames=" << ref_joint_pos_all_->rows();
+  command_fault_ = false;
+  SetRunnerState(RunnerState::kRunning);
   return true;
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "[WbtRunner::Enter] rejected T800 policy/motion: " << e.what();
+    GetMutableOutput().Reset();
+    SetRunnerState(RunnerState::kFault);
+    return false;
+  }
 }
 
 /**
@@ -174,13 +236,30 @@ void RlDanceExampleRunner::fillObsContextConstantPart() {
  * so the robot holds the final pose once the trajectory is fully played.
  */
 void RlDanceExampleRunner::Run() {
-  CalculateObservation();   // Assemble observation from registered components
-  CalculateMotorCommand();  // Run policy inference and compute target positions
+  if (command_fault_) return;
+  data_store_->joint_info.GetState(data::JointInfoType::kPosition, q_real_);
+  data_store_->joint_info.GetState(data::JointInfoType::kVelocity, qd_real_);
+  const auto imu = data_store_->imu_info.Get();
+  if (q_real_.size() != model_param_->num_total_joints ||
+      qd_real_.size() != model_param_->num_total_joints ||
+      !q_real_.allFinite() || !qd_real_.allFinite() || !imu ||
+      !imu->quaternion.coeffs().allFinite() || !imu->angular_velocity.allFinite()) {
+    FaultCommand("invalid_joint_or_imu_feedback");
+    return;
+  }
+  if (!CalculateObservation() || !CalculateMotorCommand()) return;
   SendMotorCommand();       // Send PD commands to motors
 
   // Advance trajectory frame and loop back to the start.
   // policy_step = (policy_step >= max_policy_step) ? 0 : policy_step + 1;
   policy_step = std::min(policy_step + 1, max_policy_step);
+}
+
+void RlDanceExampleRunner::FaultCommand(const char* reason) {
+  command_fault_ = true;
+  GetMutableOutput().Reset();
+  SetRunnerState(RunnerState::kFault);
+  LOG(ERROR) << "[WbtRunner] command fault: " << reason;
 }
 
 // ============================================================================
@@ -206,7 +285,7 @@ void RlDanceExampleRunner::Run() {
  *       config parameter `observation_names`. Adding or reordering entries requires
  *       retraining the policy model.
  */
-void RlDanceExampleRunner::CalculateObservation() {
+bool RlDanceExampleRunner::CalculateObservation() {
   // On the very first frame, align the yaw angle between the reference trajectory
   // and the robot's actual heading direction
   if (is_first_time_) {
@@ -225,6 +304,10 @@ void RlDanceExampleRunner::CalculateObservation() {
 
     // Update the sliding-window history buffer for this component
     Eigen::MatrixXd& buf = observation_history_buffers_[i];
+    if (single.size() != buf.rows() || !single.allFinite()) {
+      FaultCommand("invalid_observation_component");
+      return false;
+    }
     const int hist_len = static_cast<int>(buf.cols());
     if (is_first_time_) {
       // First frame: replicate the current observation across all history steps
@@ -246,6 +329,11 @@ void RlDanceExampleRunner::CalculateObservation() {
   if (is_first_time_) {
     is_first_time_ = false;
   }
+  if (output_offset != mlp_net_observation_vec.size() || !mlp_net_observation_vec.allFinite()) {
+    FaultCommand("invalid_policy_observation");
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -300,14 +388,13 @@ void RlDanceExampleRunner::updateFirstFrameYawAlignment() {
  *       around the reference trajectory joint positions, not an absolute joint target
  *       around the default pose.
  */
-void RlDanceExampleRunner::CalculateMotorCommand() {
-  // Read current joint state (used internally by some observation functions
-  // but NOT directly used in action computation here)
-  data_store_->joint_info.GetState(data::JointInfoType::kPosition, q_real_);
-  data_store_->joint_info.GetState(data::JointInfoType::kVelocity, qd_real_);
-
+bool RlDanceExampleRunner::CalculateMotorCommand() {
   // Run MLP forward inference (float precision, cast back to double)
   *mlp_net_action_ = (mlp_net_->Inference(mlp_net_observation_vec.cast<float>())).cast<double>();
+  if (mlp_net_action_->size() != param_->num_actions || !mlp_net_action_->allFinite()) {
+    FaultCommand("invalid_policy_action");
+    return false;
+  }
 
   // Map action to target joint positions:
   //   q_des = ref_joint_pos + action * action_scale (for policy-controlled joints only)
@@ -321,12 +408,22 @@ void RlDanceExampleRunner::CalculateMotorCommand() {
   } else {
     q_des_(*policy2deploy_joint_idx_) += mlp_net_action_->cwiseProduct(action_scale_);
   }
-  
+
+  uint64_t clipped_mask = 0;
+  if (!target_position_limits_.Apply(q_des_, clipped_mask)) {
+    FaultCommand("invalid_position_target");
+    return false;
+  }
+  if (clipped_mask != 0) {
+    LOG_EVERY_N(WARNING, 50) << "[WbtRunner] clipped target position, mask=0x" << std::hex << clipped_mask << std::dec;
+  }
+
   //轨迹播放完毕则退出 runner
   if (IsTrajectoryFinished()) {
     LOG(INFO) << "Trajectory finished, requesting exit.";
     SetRunnerState(RunnerState::kTryExit);
   }
+  return true;
 }
 
 /**
@@ -401,6 +498,12 @@ void RlDanceExampleRunner::initHistoryBuffers() {
  */
 Eigen::MatrixXd RlDanceExampleRunner::npyFloatToMatrixXd(const cnpy::NpyArray& npy_array, int row_index) {
   const std::vector<size_t>& shape = npy_array.shape;
+  if (npy_array.word_size != sizeof(float)) {
+    throw std::runtime_error("motion arrays must be float32 for SDK cnpy loader");
+  }
+  if (npy_array.fortran_order) {
+    throw std::runtime_error("Fortran-order motion arrays are unsupported");
+  }
   const float* data = npy_array.data<float>();
   if (shape.size() == 2) {
     size_t rows = shape[0], cols = shape[1];
